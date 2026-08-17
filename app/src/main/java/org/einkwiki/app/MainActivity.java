@@ -11,9 +11,11 @@ import android.os.Bundle;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.Window;
+import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.WebSettings;
@@ -31,11 +33,13 @@ import org.einkwiki.app.data.OfflinePackCatalogCache;
 import org.einkwiki.app.data.OfflinePackSelectionStore;
 import org.einkwiki.app.data.OfflinePackStore;
 import org.einkwiki.app.download.DownloadSnapshot;
+import org.einkwiki.app.download.DownloadSpeedTracker;
 import org.einkwiki.app.download.PackDownloadManager;
 import org.einkwiki.app.library.OfflinePackAdapter;
 import org.einkwiki.app.library.PackRowModel;
 import org.einkwiki.app.reader.KiwixArchive;
 import org.einkwiki.app.reader.PackVerifier;
+import org.einkwiki.app.reader.ReaderPageKeyMapper;
 import org.einkwiki.app.reader.SearchResult;
 import org.einkwiki.app.reader.SearchResultAdapter;
 import org.einkwiki.app.reader.ZimWebViewClient;
@@ -121,6 +125,7 @@ public final class MainActivity extends Activity {
     });
     private final AtomicInteger searchGeneration = new AtomicInteger();
     private final AtomicInteger archiveGeneration = new AtomicInteger();
+    private final DownloadSpeedTracker downloadSpeedTracker = new DownloadSpeedTracker();
 
     private OfflinePackStore packStore;
     private PackDownloadManager packDownloads;
@@ -385,6 +390,7 @@ public final class MainActivity extends Activity {
     protected void onPause() {
         resumed = false;
         mainHandler.removeCallbacks(downloadPoll);
+        downloadSpeedTracker.reset();
         super.onPause();
     }
 
@@ -710,6 +716,11 @@ public final class MainActivity extends Activity {
         }
         DownloadSnapshot activeSnapshot = packDownloads.query();
         String activeId = packDownloads.trackedPackId();
+        long activeBytesPerSecond = downloadSpeedTracker.update(
+                activeId,
+                activeSnapshot,
+                SystemClock.elapsedRealtime()
+        );
         List<OfflinePack> sorted = new ArrayList<>(catalogPacks);
         Map<String, Boolean> installedState = new HashMap<>();
         for (OfflinePack candidate : sorted) {
@@ -722,10 +733,12 @@ public final class MainActivity extends Activity {
                     candidate,
                     Boolean.TRUE.equals(installedState.get(candidate.artifactId())),
                     activeId,
-                    activeSnapshot
+                    activeSnapshot,
+                    activeBytesPerSecond
             ));
         }
         packAdapter.submitRows(rows, offlinePackList);
+        updateKeepScreenOn();
     }
 
     private void scrollPackIntoView(String artifactId) {
@@ -743,7 +756,8 @@ public final class MainActivity extends Activity {
             OfflinePack candidate,
             boolean installed,
             String activeId,
-            DownloadSnapshot activeSnapshot
+            DownloadSnapshot activeSnapshot,
+            long activeBytesPerSecond
     ) {
         String id = candidate.artifactId();
         boolean current = installed
@@ -794,7 +808,12 @@ public final class MainActivity extends Activity {
                     break;
                 case RUNNING:
                     state = PackRowModel.State.DOWNLOADING;
-                    status = "正在下载";
+                    status = activeBytesPerSecond
+                            == DownloadSpeedTracker.UNKNOWN_BYTES_PER_SECOND
+                            ? "正在下载 · 正在计算速度"
+                            : "正在下载 · "
+                            + OfflinePack.formatBytes(activeBytesPerSecond)
+                            + "/s";
                     progress = activeSnapshot.percent();
                     break;
                 case PAUSED:
@@ -818,7 +837,11 @@ public final class MainActivity extends Activity {
                 String total = activeSnapshot.totalBytes > 0
                         ? OfflinePack.formatBytes(activeSnapshot.totalBytes)
                         : candidate.humanSize();
-                detail = progress + "% · " + total;
+                detail = activeSnapshot.downloadedBytes > 0
+                        ? progress + "% · "
+                        + OfflinePack.formatBytes(activeSnapshot.downloadedBytes)
+                        + " / " + total
+                        : progress + "% · " + total;
             }
         } else if (packFailures.containsKey(id)) {
             state = PackRowModel.State.DOWNLOAD_FAILED;
@@ -1347,6 +1370,7 @@ public final class MainActivity extends Activity {
         hideKeyboard();
         navigationGeneration++;
         currentScreen = Screen.READER;
+        updateKeepScreenOn();
         homeScreen.setVisibility(View.GONE);
         libraryScreen.setVisibility(View.GONE);
         searchScreen.setVisibility(View.GONE);
@@ -1361,6 +1385,7 @@ public final class MainActivity extends Activity {
     private void showHome() {
         navigationGeneration++;
         currentScreen = Screen.HOME;
+        updateKeepScreenOn();
         homeScreen.setVisibility(View.VISIBLE);
         libraryScreen.setVisibility(View.GONE);
         searchScreen.setVisibility(View.GONE);
@@ -1376,6 +1401,7 @@ public final class MainActivity extends Activity {
     private void showLibrary() {
         navigationGeneration++;
         currentScreen = Screen.LIBRARY;
+        updateKeepScreenOn();
         homeScreen.setVisibility(View.GONE);
         libraryScreen.setVisibility(View.VISIBLE);
         searchScreen.setVisibility(View.GONE);
@@ -1395,6 +1421,7 @@ public final class MainActivity extends Activity {
     private void showSearch() {
         navigationGeneration++;
         currentScreen = Screen.SEARCH;
+        updateKeepScreenOn();
         homeScreen.setVisibility(View.GONE);
         libraryScreen.setVisibility(View.GONE);
         searchScreen.setVisibility(View.VISIBLE);
@@ -1432,20 +1459,36 @@ public final class MainActivity extends Activity {
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         int keyCode = event.getKeyCode();
-        if (keyCode == KeyEvent.KEYCODE_PAGE_UP || keyCode == KeyEvent.KEYCODE_PAGE_DOWN) {
-            int direction = keyCode == KeyEvent.KEYCODE_PAGE_UP ? -1 : 1;
-            if (currentScreen == Screen.READER || currentScreen == Screen.LIBRARY) {
+        if (currentScreen == Screen.READER) {
+            int direction = ReaderPageKeyMapper.directionFor(keyCode);
+            if (direction != 0) {
                 if (event.getAction() == KeyEvent.ACTION_UP) {
-                    if (currentScreen == Screen.READER) {
-                        pageBy(direction);
-                    } else {
-                        pageLibraryBy(direction);
-                    }
+                    pageBy(direction);
                 }
                 return true;
             }
         }
+        if (currentScreen == Screen.LIBRARY
+                && (keyCode == KeyEvent.KEYCODE_PAGE_UP
+                || keyCode == KeyEvent.KEYCODE_PAGE_DOWN)) {
+            if (event.getAction() == KeyEvent.ACTION_UP) {
+                pageLibraryBy(keyCode == KeyEvent.KEYCODE_PAGE_UP ? -1 : 1);
+            }
+            return true;
+        }
         return super.dispatchKeyEvent(event);
+    }
+
+    private void updateKeepScreenOn() {
+        Window window = getWindow();
+        boolean activeLibraryDownload = currentScreen == Screen.LIBRARY
+                && (updateState == UpdateState.DOWNLOADING
+                || (packDownloads != null && packDownloads.query().isActive()));
+        if (currentScreen == Screen.READER || activeLibraryDownload) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
     }
 
     private void pageBy(int direction) {
@@ -1659,6 +1702,7 @@ public final class MainActivity extends Activity {
     }
 
     private void renderUpdateSection() {
+        updateKeepScreenOn();
         currentVersionView.setText(getString(R.string.current_version, installedVersionName));
         if (BuildConfig.DEBUG) {
             updateStatus.setVisibility(View.VISIBLE);
