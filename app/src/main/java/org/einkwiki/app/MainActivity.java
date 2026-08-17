@@ -20,8 +20,10 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.ListView;
+import android.widget.RadioGroup;
 import android.widget.TextView;
 
 import org.einkwiki.app.library.ZimBook;
@@ -55,6 +57,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class MainActivity extends Activity {
     private enum Screen {
         HOME,
+        SETTINGS,
         LIBRARY,
         SEARCH,
         READER
@@ -93,9 +96,12 @@ public final class MainActivity extends Activity {
     }
 
     private static final int SEARCH_LIMIT = 50;
-    private static final int DEFAULT_TEXT_ZOOM = 115;
-    private static final int MIN_TEXT_ZOOM = 90;
-    private static final int MAX_TEXT_ZOOM = 150;
+    private static final int TEXT_ZOOM_SMALL = 100;
+    private static final int TEXT_ZOOM_MEDIUM = 115;
+    private static final int TEXT_ZOOM_LARGE = 130;
+    private static final int DEFAULT_TEXT_ZOOM = TEXT_ZOOM_MEDIUM;
+    private static final String PREF_READER_TEXT_ZOOM = "reader_text_zoom";
+    private static final String PREF_SHOW_PAGE_BUTTONS = "reader_show_page_buttons";
     private static final long RANDOM_REFRESH_MS = 60_000L;
     private static final String UPDATE_CACHE_DIRECTORY = "updates";
 
@@ -124,17 +130,21 @@ public final class MainActivity extends Activity {
     private List<String> importUrls = new ArrayList<>();
 
     private View homeScreen;
+    private View settingsScreen;
     private View libraryScreen;
     private View searchScreen;
     private View readerScreen;
     private Button backButton;
-    private Button libraryButton;
+    private Button settingsButton;
     private TextView toolbarTitle;
     private TextView messageBar;
     private EditText homeSearchInput;
     private TextView randomEntriesTitle;
-    private final Button[] randomEntryButtons = new Button[3];
+    private final TextView[] randomEntryLabels = new TextView[3];
     private final SearchResult[] randomEntries = new SearchResult[3];
+    private Button openLibraryButton;
+    private CheckBox showPageButtonsCheckbox;
+    private RadioGroup fontSizeGroup;
     private ListView bookList;
     private Button startImportButton;
     private TextView importAddress;
@@ -146,6 +156,7 @@ public final class MainActivity extends Activity {
     private TextView searchStatus;
     private ListView searchResults;
     private WebView articleWebView;
+    private View readerPageControls;
     private TextView currentVersionView;
     private TextView updateStatus;
     private Button updateButton;
@@ -159,6 +170,7 @@ public final class MainActivity extends Activity {
     private boolean clearHistoryOnPageFinish;
     private int navigationGeneration;
     private int textZoom;
+    private boolean showPageButtons;
 
     private UpdatePackageVerifier updateVerifier;
     private SystemUpdateInstaller updateInstaller;
@@ -207,10 +219,14 @@ public final class MainActivity extends Activity {
         UpdateCacheCleaner.clearAbandoned(this);
         updateVerifier = new UpdatePackageVerifier(this);
         updateInstaller = new SystemUpdateInstaller(this);
-        textZoom = getPreferences(MODE_PRIVATE)
-                .getInt("reader_text_zoom", DEFAULT_TEXT_ZOOM);
+        int savedTextZoom = getPreferences(MODE_PRIVATE)
+                .getInt(PREF_READER_TEXT_ZOOM, DEFAULT_TEXT_ZOOM);
+        textZoom = nearestTextZoom(savedTextZoom);
+        showPageButtons = getPreferences(MODE_PRIVATE)
+                .getBoolean(PREF_SHOW_PAGE_BUTTONS, true);
 
         configureReader();
+        renderReaderPreferences();
         bindActions();
         loadInstalledVersionName();
         renderUpdateSection();
@@ -231,18 +247,23 @@ public final class MainActivity extends Activity {
 
     private void bindViews() {
         homeScreen = findViewById(R.id.home_screen);
+        settingsScreen = findViewById(R.id.settings_screen);
         libraryScreen = findViewById(R.id.library_screen);
         searchScreen = findViewById(R.id.search_screen);
         readerScreen = findViewById(R.id.reader_screen);
         backButton = findViewById(R.id.back_button);
-        libraryButton = findViewById(R.id.library_button);
+        settingsButton = findViewById(R.id.settings_button);
         toolbarTitle = findViewById(R.id.toolbar_title);
         messageBar = findViewById(R.id.message_bar);
         homeSearchInput = findViewById(R.id.home_search_input);
         randomEntriesTitle = findViewById(R.id.random_entries_title);
-        randomEntryButtons[0] = findViewById(R.id.random_entry_1);
-        randomEntryButtons[1] = findViewById(R.id.random_entry_2);
-        randomEntryButtons[2] = findViewById(R.id.random_entry_3);
+        randomEntryLabels[0] = findViewById(R.id.random_entry_1);
+        randomEntryLabels[1] = findViewById(R.id.random_entry_2);
+        randomEntryLabels[2] = findViewById(R.id.random_entry_3);
+
+        openLibraryButton = findViewById(R.id.open_library_button);
+        showPageButtonsCheckbox = findViewById(R.id.show_page_buttons_checkbox);
+        fontSizeGroup = findViewById(R.id.font_size_group);
 
         bookList = findViewById(R.id.offline_pack_list);
         bookList.setItemsCanFocus(true);
@@ -261,6 +282,7 @@ public final class MainActivity extends Activity {
         searchStatus = findViewById(R.id.search_status);
         searchResults = findViewById(R.id.search_results);
         articleWebView = findViewById(R.id.article_webview);
+        readerPageControls = findViewById(R.id.reader_page_controls);
         currentVersionView = libraryFooter.findViewById(R.id.current_version);
         updateStatus = libraryFooter.findViewById(R.id.update_status);
         updateButton = libraryFooter.findViewById(R.id.update_button);
@@ -295,7 +317,8 @@ public final class MainActivity extends Activity {
 
     private void bindActions() {
         backButton.setOnClickListener(view -> handleBack());
-        libraryButton.setOnClickListener(view -> {
+        settingsButton.setOnClickListener(view -> showSettings());
+        openLibraryButton.setOnClickListener(view -> {
             if (importServer == null) {
                 showLibrary();
             }
@@ -322,9 +345,9 @@ public final class MainActivity extends Activity {
         });
         searchResults.setOnItemClickListener((parent, view, position, id) ->
                 openArticle(resultAdapter.itemAt(position), Screen.SEARCH));
-        for (int index = 0; index < randomEntryButtons.length; index++) {
+        for (int index = 0; index < randomEntryLabels.length; index++) {
             final int entryIndex = index;
-            randomEntryButtons[index].setOnClickListener(view -> {
+            randomEntryLabels[index].setOnClickListener(view -> {
                 SearchResult entry = randomEntries[entryIndex];
                 if (entry != null) {
                     openArticle(entry, Screen.HOME);
@@ -333,8 +356,53 @@ public final class MainActivity extends Activity {
         }
         findViewById(R.id.page_up_button).setOnClickListener(view -> pageBy(-1));
         findViewById(R.id.page_down_button).setOnClickListener(view -> pageBy(1));
-        findViewById(R.id.font_smaller_button).setOnClickListener(view -> adjustTextZoom(-10));
-        findViewById(R.id.font_larger_button).setOnClickListener(view -> adjustTextZoom(10));
+        showPageButtonsCheckbox.setOnCheckedChangeListener((button, checked) -> {
+            showPageButtons = checked;
+            readerPageControls.setVisibility(checked ? View.VISIBLE : View.GONE);
+            getPreferences(MODE_PRIVATE).edit()
+                    .putBoolean(PREF_SHOW_PAGE_BUTTONS, checked)
+                    .apply();
+        });
+        fontSizeGroup.setOnCheckedChangeListener((group, checkedId) -> {
+            if (checkedId == R.id.font_size_small) {
+                setTextZoom(TEXT_ZOOM_SMALL);
+            } else if (checkedId == R.id.font_size_medium) {
+                setTextZoom(TEXT_ZOOM_MEDIUM);
+            } else if (checkedId == R.id.font_size_large) {
+                setTextZoom(TEXT_ZOOM_LARGE);
+            }
+        });
+    }
+
+    private void renderReaderPreferences() {
+        showPageButtonsCheckbox.setChecked(showPageButtons);
+        readerPageControls.setVisibility(showPageButtons ? View.VISIBLE : View.GONE);
+        if (textZoom == TEXT_ZOOM_SMALL) {
+            fontSizeGroup.check(R.id.font_size_small);
+        } else if (textZoom == TEXT_ZOOM_LARGE) {
+            fontSizeGroup.check(R.id.font_size_large);
+        } else {
+            fontSizeGroup.check(R.id.font_size_medium);
+        }
+    }
+
+    private static int nearestTextZoom(int value) {
+        int smallDistance = Math.abs(value - TEXT_ZOOM_SMALL);
+        int mediumDistance = Math.abs(value - TEXT_ZOOM_MEDIUM);
+        int largeDistance = Math.abs(value - TEXT_ZOOM_LARGE);
+        if (smallDistance <= mediumDistance && smallDistance <= largeDistance) {
+            return TEXT_ZOOM_SMALL;
+        }
+        return mediumDistance <= largeDistance ? TEXT_ZOOM_MEDIUM : TEXT_ZOOM_LARGE;
+    }
+
+    private void setTextZoom(int zoom) {
+        if (textZoom == zoom) {
+            return;
+        }
+        textZoom = zoom;
+        articleWebView.getSettings().setTextZoom(textZoom);
+        getPreferences(MODE_PRIVATE).edit().putInt(PREF_READER_TEXT_ZOOM, textZoom).apply();
     }
 
     private static boolean isSearchAction(int actionId, KeyEvent event) {
@@ -842,7 +910,7 @@ public final class MainActivity extends Activity {
             ioExecutor.execute(() -> {
                 List<SearchResult> entries;
                 try {
-                    entries = randomArchive.randomEntries(randomEntryButtons.length);
+                    entries = randomArchive.randomEntries(randomEntryLabels.length);
                 } catch (RuntimeException error) {
                     entries = new ArrayList<>();
                 }
@@ -862,21 +930,21 @@ public final class MainActivity extends Activity {
 
     private void showRandomEntries(List<SearchResult> entries) {
         randomEntriesTitle.setVisibility(entries.isEmpty() ? View.GONE : View.VISIBLE);
-        for (int index = 0; index < randomEntryButtons.length; index++) {
+        for (int index = 0; index < randomEntryLabels.length; index++) {
             SearchResult entry = index < entries.size() ? entries.get(index) : null;
             randomEntries[index] = entry;
-            randomEntryButtons[index].setVisibility(entry == null ? View.GONE : View.VISIBLE);
+            randomEntryLabels[index].setVisibility(entry == null ? View.GONE : View.VISIBLE);
             if (entry != null) {
-                randomEntryButtons[index].setText(entry.title);
+                randomEntryLabels[index].setText(entry.title);
             }
         }
     }
 
     private void hideRandomEntries() {
         randomEntriesTitle.setVisibility(View.GONE);
-        for (int index = 0; index < randomEntryButtons.length; index++) {
+        for (int index = 0; index < randomEntryLabels.length; index++) {
             randomEntries[index] = null;
-            randomEntryButtons[index].setVisibility(View.GONE);
+            randomEntryLabels[index].setVisibility(View.GONE);
         }
     }
 
@@ -898,11 +966,12 @@ public final class MainActivity extends Activity {
         currentScreen = Screen.READER;
         updateKeepScreenOn();
         homeScreen.setVisibility(View.GONE);
+        settingsScreen.setVisibility(View.GONE);
         libraryScreen.setVisibility(View.GONE);
         searchScreen.setVisibility(View.GONE);
         readerScreen.setVisibility(View.VISIBLE);
         backButton.setVisibility(View.VISIBLE);
-        libraryButton.setVisibility(View.VISIBLE);
+        settingsButton.setVisibility(View.GONE);
         toolbarTitle.setText(result.title);
         clearHistoryOnPageFinish = true;
         articleWebView.loadUrl(archive.contentUrl(result.path));
@@ -912,11 +981,12 @@ public final class MainActivity extends Activity {
         navigationGeneration++;
         currentScreen = Screen.HOME;
         homeScreen.setVisibility(View.VISIBLE);
+        settingsScreen.setVisibility(View.GONE);
         libraryScreen.setVisibility(View.GONE);
         searchScreen.setVisibility(View.GONE);
         readerScreen.setVisibility(View.GONE);
         backButton.setVisibility(View.GONE);
-        libraryButton.setVisibility(View.VISIBLE);
+        settingsButton.setVisibility(View.VISIBLE);
         toolbarTitle.setText(R.string.app_name);
         homeSearchInput.setEnabled(openingFileName.isEmpty());
         homeScreen.requestFocus();
@@ -925,16 +995,34 @@ public final class MainActivity extends Activity {
         updateKeepScreenOn();
     }
 
+    private void showSettings() {
+        navigationGeneration++;
+        currentScreen = Screen.SETTINGS;
+        mainHandler.removeCallbacks(randomRefresh);
+        homeScreen.setVisibility(View.GONE);
+        settingsScreen.setVisibility(View.VISIBLE);
+        libraryScreen.setVisibility(View.GONE);
+        searchScreen.setVisibility(View.GONE);
+        readerScreen.setVisibility(View.GONE);
+        backButton.setVisibility(View.VISIBLE);
+        settingsButton.setVisibility(View.GONE);
+        toolbarTitle.setText(R.string.settings_title);
+        renderReaderPreferences();
+        hideKeyboard();
+        updateKeepScreenOn();
+    }
+
     private void showLibrary() {
         navigationGeneration++;
         currentScreen = Screen.LIBRARY;
         mainHandler.removeCallbacks(randomRefresh);
         homeScreen.setVisibility(View.GONE);
+        settingsScreen.setVisibility(View.GONE);
         libraryScreen.setVisibility(View.VISIBLE);
         searchScreen.setVisibility(View.GONE);
         readerScreen.setVisibility(View.GONE);
         backButton.setVisibility(View.VISIBLE);
-        libraryButton.setVisibility(View.GONE);
+        settingsButton.setVisibility(View.GONE);
         toolbarTitle.setText(R.string.library_title);
         hideKeyboard();
         refreshBooks("");
@@ -947,11 +1035,12 @@ public final class MainActivity extends Activity {
         currentScreen = Screen.SEARCH;
         mainHandler.removeCallbacks(randomRefresh);
         homeScreen.setVisibility(View.GONE);
+        settingsScreen.setVisibility(View.GONE);
         libraryScreen.setVisibility(View.GONE);
         searchScreen.setVisibility(View.VISIBLE);
         readerScreen.setVisibility(View.GONE);
         backButton.setVisibility(View.VISIBLE);
-        libraryButton.setVisibility(View.GONE);
+        settingsButton.setVisibility(View.GONE);
         toolbarTitle.setText(R.string.search_title);
         updateKeepScreenOn();
     }
@@ -976,6 +1065,8 @@ public final class MainActivity extends Activity {
                 showHome();
             }
         } else if (currentScreen == Screen.LIBRARY) {
+            showSettings();
+        } else if (currentScreen == Screen.SETTINGS) {
             showHome();
         } else {
             finish();
@@ -1031,13 +1122,6 @@ public final class MainActivity extends Activity {
         int overlap = Math.round(48 * getResources().getDisplayMetrics().density);
         int distance = Math.max(1, bookList.getHeight() - overlap);
         bookList.scrollListBy(direction * distance);
-    }
-
-    private void adjustTextZoom(int delta) {
-        textZoom = Math.max(MIN_TEXT_ZOOM, Math.min(MAX_TEXT_ZOOM, textZoom + delta));
-        articleWebView.getSettings().setTextZoom(textZoom);
-        getPreferences(MODE_PRIVATE).edit().putInt("reader_text_zoom", textZoom).apply();
-        showMessage("正文缩放 " + textZoom + "%");
     }
 
     private void loadInstalledVersionName() {
