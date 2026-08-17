@@ -146,9 +146,22 @@ jobs:
           verification_output="$("$apksigner_path" verify --verbose --print-certs "$signed_apk")"
           printf '%s\n' "$verification_output"
           signer_count="$(printf '%s\n' "$verification_output" | sed -n 's/^Number of signers: //p')"
-          actual_cert_sha256="$(printf '%s\n' "$verification_output" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
+          actual_cert_sha256_values="$(
+            printf '%s\n' "$verification_output" |
+              sed -n -E 's/^.*certificate SHA-256 digest: ([[:xdigit:]]{64})$/\1/p' |
+              tr '[:upper:]' '[:lower:]' |
+              sort -u
+          )"
+          actual_cert_sha256_count="$(
+            printf '%s\n' "$actual_cert_sha256_values" |
+              sed '/^$/d' |
+              wc -l |
+              tr -d '[:space:]'
+          )"
           expected_cert_sha256="0e1e49f9526b8b626a46d0b571db77bbe45e1c7635031c9ddd56553278ef6224"
-          if [[ "$signer_count" != "1" || "$actual_cert_sha256" != "$expected_cert_sha256" ]]; then
+          if [[ "$signer_count" != "1" ||
+                "$actual_cert_sha256_count" != "1" ||
+                "$actual_cert_sha256_values" != "$expected_cert_sha256" ]]; then
             printf 'Release signing certificate does not match the published EInkWiki certificate.\n' >&2
             exit 1
           fi
