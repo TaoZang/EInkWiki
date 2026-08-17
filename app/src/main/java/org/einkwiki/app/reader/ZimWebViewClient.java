@@ -1,5 +1,6 @@
 package org.einkwiki.app.reader;
 
+import android.content.Context;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.webkit.WebResourceRequest;
@@ -8,6 +9,8 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Locale;
@@ -25,7 +28,8 @@ public final class ZimWebViewClient extends WebViewClient {
         void onMainFrameError();
     }
 
-    private static final String LOCAL_HOST = "kiwix.local";
+    private static final String LOCAL_HOST = "zim.local";
+    private static final String READER_FONT_PATH = "__einkwiki/NotoSerifSC.ttf";
     private static final Map<String, String> SECURITY_HEADERS;
 
     static {
@@ -40,10 +44,12 @@ public final class ZimWebViewClient extends WebViewClient {
         SECURITY_HEADERS = Collections.unmodifiableMap(headers);
     }
 
-    private final KiwixArchive archive;
+    private final Context context;
+    private final ZimArchive archive;
     private final Listener listener;
 
-    public ZimWebViewClient(KiwixArchive archive, Listener listener) {
+    public ZimWebViewClient(Context context, ZimArchive archive, Listener listener) {
+        this.context = context.getApplicationContext();
         this.archive = archive;
         this.listener = listener;
     }
@@ -70,6 +76,19 @@ public final class ZimWebViewClient extends WebViewClient {
         String path = Uri.decode(encodedPath);
         while (path.startsWith("/")) {
             path = path.substring(1);
+        }
+        if (READER_FONT_PATH.equals(path)) {
+            try {
+                return response(
+                        200,
+                        "OK",
+                        "font/ttf",
+                        null,
+                        context.getAssets().open("fonts/NotoSerifSC.ttf")
+                );
+            } catch (IOException ignored) {
+                return response(404, "Not Found", "text/plain", "UTF-8", new byte[0]);
+            }
         }
         try {
             ZimResource resource = archive.resource(path);
@@ -128,13 +147,29 @@ public final class ZimWebViewClient extends WebViewClient {
             String encoding,
             byte[] bytes
     ) {
+        return response(
+                status,
+                reason,
+                mimeType,
+                encoding,
+                new ByteArrayInputStream(bytes)
+        );
+    }
+
+    private static WebResourceResponse response(
+            int status,
+            String reason,
+            String mimeType,
+            String encoding,
+            InputStream input
+    ) {
         return new WebResourceResponse(
                 mimeType,
                 encoding,
                 status,
                 reason,
                 SECURITY_HEADERS,
-                new ByteArrayInputStream(bytes)
+                input
         );
     }
 

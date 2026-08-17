@@ -14,31 +14,51 @@
         android:textColor="@color/ink_black"
         android:textSize="@dimen/text_body" />
 
-    <LinearLayout
+    <Button
+        android:id="@+id/start_import_button"
+        style="@style/Widget.EInkWiki.Button.Primary"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:orientation="horizontal">
+        android:layout_marginTop="10dp"
+        android:minHeight="48dp"
+        android:text="@string/start_lan_import" />
 
-        <TextView
-            android:id="@+id/catalog_status"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:gravity="center_vertical"
-            android:minHeight="48dp"
-            android:text="@string/catalog_builtin_status"
-            android:textColor="@color/ink_gray"
-            android:textSize="@dimen/text_small" />
+    <TextView
+        android:id="@+id/import_address"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:background="@drawable/panel_border"
+        android:padding="10dp"
+        android:textColor="@color/ink_black"
+        android:textIsSelectable="true"
+        android:textSize="16sp"
+        android:visibility="gone" />
 
-        <Button
-            android:id="@+id/refresh_catalog_button"
-            style="@style/Widget.EInkWiki.Button"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:maxLines="2"
-            android:minHeight="48dp"
-            android:text="@string/refresh_catalog" />
-    </LinearLayout>
+    <TextView
+        android:id="@+id/import_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/import_waiting"
+        android:textColor="@color/ink_black"
+        android:textSize="@dimen/text_small"
+        android:visibility="gone" />
+
+    <org.einkwiki.app.EInkProgressView
+        android:id="@+id/import_progress"
+        android:layout_width="match_parent"
+        android:layout_height="18dp"
+        android:layout_marginTop="8dp"
+        android:visibility="gone" />
+
+    <Button
+        android:id="@+id/stop_import_button"
+        style="@style/Widget.EInkWiki.Button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:minHeight="48dp"
+        android:text="@string/stop_lan_import"
+        android:visibility="gone" />
 </LinearLayout>

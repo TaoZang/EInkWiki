@@ -26,7 +26,14 @@ This application uses `androidx.core:core:1.15.0`, including `FileProvider`, to 
 - <https://github.com/unicode-org/icu/blob/main/LICENSE>
 - <https://github.com/kiwix/kiwix-android>
 
-The three local license files above are also packaged as readable APK assets.
+## Noto Serif SC
+
+The reader bundles `NotoSerifSC[wght].ttf` from the Google Fonts repository and exposes it only to locally rendered ZIM pages. The font is licensed under the SIL Open Font License 1.1. A complete local copy is included at [`licenses/NotoSerifSC-OFL.txt`](licenses/NotoSerifSC-OFL.txt).
+
+- <https://github.com/google/fonts/tree/main/ofl/notoserifsc>
+- Source commit: `2e61f4355afd22b801791b0df176065082423b87`
+
+The local license files above are also packaged as readable APK assets.
 
 ## Other packaged libraries
 
@@ -38,4 +45,4 @@ The resolved release dependency graph also includes ReLinker 1.4.5, Kotlin stand
 
 ## Wikipedia content
 
-Wikipedia content is not bundled into the APK. Users download a separate OpenZIM archive from Kiwix. Wikipedia text is generally available under CC BY-SA 4.0 and the GNU Free Documentation License; individual articles may contain additional notices. Kiwix/OpenZIM packages the content but does not become its author.
+ZIM content is not bundled into the APK. Users provide their own archives; each archive and its individual pages may contain different source and license notices.

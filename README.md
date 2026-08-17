@@ -1,25 +1,24 @@
 # 墨水维基（EInkWiki）
 
-一个面向 Android 墨水屏设备的只读维基百科客户端。APK 本身不包含百科数据；用户安装后从 Kiwix 官方目录下载独立的 OpenZIM 离线包，然后在设备上完成搜索和全文阅读。
+一个面向 Android 墨水屏设备的只读 ZIM 客户端。APK 本身不包含百科数据；用户通过局域网从电脑浏览器导入任意 `.zim` 文件，然后在设备上完成本地搜索和全文阅读。
 
-当前是可运行的 MVP：书库从 Kiwix 官方 OPDS 目录读取全部中文 Wikipedia 包，支持同时安装多个 ZIM，并由用户指定首页使用的搜索库。APK 仍不包含百科数据；无网时会显示上次缓存目录，并保留一个约 41.9 MiB 的中文化学无图包作为首次兜底项。
+应用不限定 ZIM 的下载来源，不访问内容目录，也不联网查询文件哈希。接收完成后只检查文件能否作为 ZIM 打开并读取；多个文件可以共存，并由用户指定首页使用的搜索库。
 
 源码公开在 [TaoZang/EInkWiki](https://github.com/TaoZang/EInkWiki)，正式 APK 通过 [GitHub Releases](https://github.com/TaoZang/EInkWiki/releases/latest) 分发。
 
 ## 已实现
 
-- 默认进入只有关键词输入框的极简首页；右上角“书库”用于下载和管理离线包
-- 进入书库时按需更新 Kiwix 官方中文 Wikipedia 目录；当前目录包含全库、热门和 11 个主题系列的 mini / nopic / maxi 变体
-- 支持多个离线包共存、逐包下载/取消/校验/删除，并可明确切换唯一的“当前搜索库”
-- 使用系统 `DownloadManager` 下载，应用退出或进程重启后仍可继续由系统管理
-- 下载进度、已下载容量和实时速度显示，以及取消和失败重试
-- 文件大小、SHA-256、libzim 可读性三重校验，再从 `.partial` 原子激活为 `.zim`
+- 默认进入极简首页，搜索框固定居中；从当前书库随机显示三个条目并每分钟刷新
+- 书库页启动一个仅在当前局域网监听的 HTTP 上传页，电脑无需 ADB 或额外软件
+- 浏览器以 8 MiB 分块传输，显示进度与实时速度；同名、同大小文件可从未完成位置继续
+- 支持任意来源的 ZIM、多文件共存、删除，并可明确切换唯一的“当前搜索库”
+- 接收完成后只做 ZIM 结构可读性检查，不计算或联网查询 MD5/SHA
 - 使用 `libkiwix 2.6.0` / `libzim` 做中文全文搜索；无全文索引时回退到标题建议
 - WebView 只从当前 ZIM 读取 HTML、CSS、字体和图片，拒绝外部网络资源
 - JavaScript、DOM Storage、数据库、媒体和所有页面动画均禁用
-- 纯黑白排版、衬线正文、静态边框和静态进度条
+- 纯黑白排版、内置 Noto Serif SC 衬线正文、缩小的文章标题、静态边框和静态进度条
 - 整页翻页按钮，兼容物理 Page、音量、左右方向和 Navigate 翻页键
-- 正文阅读期间以及书库存在活动下载时保持屏幕常亮，结束或离开后恢复系统休眠
+- 正文阅读和局域网导入期间保持屏幕常亮，结束后恢复系统休眠
 - 90%–150% 正文字号调节
 - 不申请传统外部存储权限，也不申请 `MANAGE_EXTERNAL_STORAGE`
 - 只在用户点击后检查 GitHub Releases；更新包经 SHA-256、包名、版本和签名证书复核后交给系统安装器
@@ -38,23 +37,11 @@
 0e1e49f9526b8b626a46d0b571db77bbe45e1c7635031c9ddd56553278ef6224
 ```
 
-## 离线包目录与兜底包
+## 导入 ZIM
 
-应用访问 Kiwix 的[中文 Wikipedia OPDS v2 目录](https://opds.library.kiwix.org/catalog/v2/entries?lang=zho&category=wikipedia&count=-1)。目录元数据会缓存在本机；用户点击某个包的“下载”后，应用再读取该条目的官方 `.meta4`，取得精确文件大小与 SHA-256，校验信息准备完成后才交给系统下载。
+在书库页点击“通过局域网导入 ZIM”，保持 App 在前台和屏幕常亮，然后在同一局域网的电脑浏览器打开屏幕显示的地址。选择 `.zim` 文件后即可传输；中断后重新选择同一文件会从已接收位置继续。一次服务会顺序接收多个文件，完成后点击“停止导入”。
 
-`mini` 是精简无图内容，`nopic` 是完整正文无图，`maxi` 是完整正文含图。书库只展示每个系列的当前版本；已安装的旧版本描述会单独保留，不会因远端目录换月而消失。
-
-首次无缓存且目录不可达时使用以下兜底项：
-
-| 字段 | 值 |
-|---|---|
-| 名称 | 中文维基百科 · 化学 · 无图 |
-| 文件 | `wikipedia_zh_chemistry_nopic_2026-06.zim` |
-| 大小 | 43,883,567 bytes（41.9 MiB） |
-| SHA-256 | `3a25f1e50da3f20d5c63bb54fdb7cfaf0d5af03656d7fc83511bd300bf9dbbbd` |
-| 下载源 | [Kiwix 官方目录](https://download.kiwix.org/zim/wikipedia/wikipedia_zh_chemistry_nopic_2026-06.zim) |
-
-应用将包保存到应用专属外部目录的 `offline/packs/` 下。卸载应用时，Android 会删除该目录及离线包。
+应用只接受 `.zim` 扩展名，并在完成时尝试打开和读取一个条目。它不会判断内容来自哪个网站，也不会验证远端 MD5/SHA。文件保存在应用专属外部目录的 `offline/packs/` 下；卸载应用时 Android 会删除该目录及书库。
 
 ## 构建
 
@@ -78,7 +65,7 @@ APK 只包含 `arm64-v8a` 和 `armeabi-v7a` native library，覆盖目标墨水�
 ./gradlew connectedDebugAndroidTest
 ```
 
-项目已在 Android 15/API 35 ARM64 16 KB 页大小模拟器上完成 31 项目录加载、双包共存、13.5 MiB 包实际下载与校验、搜索库切换、进程重启恢复、全文搜索及阅读测试。此前单包流程的测试记录和截图见 [artifacts/emulator-test-20260817/README.md](artifacts/emulator-test-20260817/README.md)。
+项目使用 Android 15/API 35 ARM64 16 KB 页大小模拟器验证原生 ZIM 读取、全文搜索和阅读。历史测试记录和截图见 [artifacts/emulator-test-20260817/README.md](artifacts/emulator-test-20260817/README.md)。
 
 ## 代码结构
 
@@ -86,10 +73,9 @@ APK 只包含 `arm64-v8a` 和 `armeabi-v7a` native library，覆盖目标墨水�
 app/src/main/java/org/einkwiki/app/
 ├── MainActivity.java              单 Activity UI 与状态编排
 ├── EInkProgressView.java          无动画静态进度条
-├── data/                          离线包目录、版本和校验状态
-├── download/                      Android DownloadManager 封装
-├── library/                       离线包行状态与无动画列表适配器
-├── reader/                        ICU/libkiwix、搜索、ZIM 资源与 WebView
+├── library/                       本地 ZIM 书库与无动画列表适配器
+├── transfer/                      浏览器局域网分块上传服务
+├── reader/                        ICU/libzim、搜索、ZIM 资源与 WebView
 └── update/                        GitHub Release、APK 校验与系统安装器
 ```
 
@@ -108,9 +94,8 @@ app/src/main/java/org/einkwiki/app/
 
 ## 数据来源与许可
 
-- Kiwix/OpenZIM 从 Wikimedia 项目内容制作 ZIM，应用仅下载和读取该独立数据文件。
-- 维基百科文本通常按 CC BY-SA 4.0 和 GFDL 提供，具体署名与许可信息以离线条目所带页面信息为准。
+- 应用读取用户自行取得的 ZIM；内容来源、署名和许可信息以具体文件及条目页面为准。
 - 本项目因链接 GPL 的 `libkiwix`，整体以 GPL-3.0 发布，见 [LICENSE](LICENSE)。
-- ICU 数据和其他第三方组件说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-- GPL-3.0、Apache-2.0 与 ICU 58 的完整许可副本位于 [licenses/](licenses/)，并作为可读 assets 打入 APK。
+- ICU 数据、Noto Serif SC 字体和其他第三方组件说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- GPL-3.0、Apache-2.0、ICU 58 与 SIL Open Font License 的完整许可副本位于 [licenses/](licenses/)，并作为可读 assets 打入 APK。
 - 每个 Release 标签对应当版 APK 的完整项目源码和构建脚本；GitHub 自动提供该标签的源码压缩包。

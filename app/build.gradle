@@ -7,7 +7,7 @@ def configuredVersionCode = providers.gradleProperty('versionCode')
         .get()
         .toInteger()
 def configuredVersionName = providers.gradleProperty('versionName')
-        .orElse('0.3.0')
+        .orElse('0.4.0')
         .get()
 
 if (configuredVersionCode < 1) {

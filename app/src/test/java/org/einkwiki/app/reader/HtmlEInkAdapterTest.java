@@ -20,6 +20,8 @@ public final class HtmlEInkAdapterTest {
         assertTrue(result.indexOf("einkwiki-style") < result.indexOf("</head>"));
         assertTrue(result.contains("正文"));
         assertTrue(result.contains("animation:none!important"));
+        assertTrue(result.contains("EInkWiki Serif"));
+        assertTrue(result.contains("h1{font-size:1.35em!important"));
     }
 
     @Test
