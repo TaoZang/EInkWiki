@@ -1,16 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">墨水维基</string>
+    <string name="home_search_hint">输入关键词搜索</string>
+    <string name="home_pack_required">请先在书库下载并选择一个离线包</string>
+    <string name="opening_offline_pack">正在打开离线包…</string>
     <string name="library_title">离线书库</string>
-    <string name="library_intro">先下载一个小型中文维基百科离线包。下载后，搜索和阅读都不需要网络。</string>
-    <string name="pack_title">中文维基百科 · 化学 · 无图</string>
-    <string name="pack_description">完整条目正文，不含图片。开发包约 41.9 MiB，数据由 Kiwix/OpenZIM 从维基百科制作。</string>
-    <string name="pack_source">来源：Kiwix 官方下载目录 · 2026–06</string>
-    <string name="download_pack">下载离线包</string>
-    <string name="cancel_download">取消下载</string>
-    <string name="retry_download">重新下载</string>
-    <string name="open_search">开始离线搜索</string>
-    <string name="remove_pack">删除离线包</string>
+    <string name="library_intro">选择需要的中文维基百科离线包。可同时保存多个包，并指定一个作为首页的搜索库。</string>
+    <string name="catalog_builtin_status">正在显示内置目录</string>
+    <string name="catalog_cache_status">正在显示已缓存的 Kiwix 目录</string>
+    <string name="catalog_refreshing">正在更新 Kiwix 官方目录…</string>
+    <string name="catalog_ready_format">Kiwix 官方目录 · %1$d 个中文包</string>
+    <string name="catalog_refresh_failed">无法更新目录，继续显示缓存或内置目录</string>
+    <string name="refresh_catalog">更新目录</string>
     <string name="search_title">离线搜索</string>
     <string name="search_hint">输入关键词</string>
     <string name="search_action">搜索</string>
@@ -24,19 +25,12 @@
     <string name="font_smaller">字小</string>
     <string name="font_larger">字大</string>
     <string name="confirm_remove_title">删除离线包？</string>
-    <string name="confirm_remove_message">删除后，需要重新下载才能离线搜索和阅读。</string>
     <string name="remove">删除</string>
     <string name="cancel">取消</string>
     <string name="external_link_blocked">这是外部链接，离线模式不会打开</string>
     <string name="reader_load_failed">无法读取这个条目</string>
-    <string name="download_progress_description">下载进度</string>
     <string name="pack_storage_note">离线包保存在应用专属目录，不需要存储权限；卸载应用时系统会一并删除。</string>
-    <string name="download_network_detail">需要联网一次 · %1$s</string>
-    <string name="verifying_detail">检查文件大小、SHA-256 和 ZIM 结构…</string>
-    <string name="ready_detail">%1$s · %2$s · 已通过校验</string>
     <string name="search_failed_format">搜索失败：%1$s</string>
-    <string name="download_detail_format">%1$d%% · %2$s / %3$s</string>
-    <string name="download_progress_format">下载进度 %1$d%%</string>
     <string name="updates_title">应用更新</string>
     <string name="current_version">当前版本：%1$s</string>
     <string name="check_for_updates">检查更新</string>
@@ -55,6 +49,19 @@
     <string name="installer_unavailable">无法打开系统安装程序。</string>
     <string name="update_file_unavailable">已下载的更新文件不可用，请重新检查。</string>
     <string name="debug_update_disabled">调试版本不使用正式版自动更新。</string>
+    <string name="pack_row_action_download">下载</string>
+    <string name="pack_row_action_preparing">正在准备</string>
+    <string name="pack_row_action_cancel">取消下载</string>
+    <string name="pack_row_action_retry">重试下载</string>
+    <string name="pack_row_action_retry_registry">重试保存状态</string>
+    <string name="pack_row_action_redownload">删除并重新下载</string>
+    <string name="pack_row_action_set_current">设为搜索库</string>
+    <string name="pack_row_action_search">开始搜索</string>
+    <string name="pack_row_action_update">下载新版</string>
+    <string name="pack_row_action_delete">删除</string>
+    <string name="pack_row_action_verifying">正在校验</string>
+    <string name="pack_row_action_deleting">正在删除</string>
+    <string name="pack_row_progress_percent">下载进度 %1$d%%</string>
     <plurals name="search_result_count">
         <item quantity="other">找到 %1$d 条结果</item>
     </plurals>

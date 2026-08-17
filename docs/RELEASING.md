@@ -24,12 +24,12 @@ release 证书 SHA-256 指纹为：
 ## 发布新版本
 
 1. 确认 `main` 已通过本地测试，工作区干净。
-2. 更新变更说明，并以规范三段版本号创建标签，例如 `v0.1.1`。
-3. 推送提交和标签：`git push origin main && git push origin v0.1.1`。
+2. 更新变更说明，并以规范三段版本号创建标签，例如 `v0.2.0`。
+3. 推送提交和标签：`git push origin main && git push origin v0.2.0`。
 4. GitHub Actions 会运行 lint、单元测试、debug/release 构建、zipalign 和签名验证。
 5. 成功后 Release 会包含且只依赖以下更新资产：
-   - `EInkWiki-v0.1.1.apk`
-   - `EInkWiki-v0.1.1.apk.sha256`
+   - `EInkWiki-v0.2.0.apk`
+   - `EInkWiki-v0.2.0.apk.sha256`
 6. 在 ARM 设备上从上一正式版本走一次“检查更新 → 下载并校验 → 系统安装器”回归，确认离线包和设置保留。
 
 工作流先创建 draft、上传并核对 APK 与 SHA-256 两项资产，最后才公开。若中途失败，可修复原因后重新运行：工作流只会修复同标签的残留 draft；一旦 Release 已公开，就会拒绝替换其资产。不要替换已经分发的同版本 APK。
@@ -39,7 +39,7 @@ release 证书 SHA-256 指纹为：
 以下命令只生成未签名 APK，主要用于预检：
 
 ```bash
-./gradlew -PversionName=0.1.1 -PversionCode=2 lintRelease testReleaseUnitTest assembleRelease
+./gradlew -PversionName=0.2.0 -PversionCode=5 lintRelease testReleaseUnitTest assembleRelease
 ```
 
 正式分发必须由固定 release keystore 签名。debug APK、未签名 APK或由其他证书签名的 APK 均不能作为 GitHub Release 更新源。

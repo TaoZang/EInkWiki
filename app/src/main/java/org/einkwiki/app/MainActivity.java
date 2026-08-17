@@ -25,9 +25,15 @@ import android.widget.ListView;
 import android.widget.TextView;
 
 import org.einkwiki.app.data.OfflinePack;
+import org.einkwiki.app.data.InstalledPackSnapshotStore;
+import org.einkwiki.app.data.KiwixCatalogClient;
+import org.einkwiki.app.data.OfflinePackCatalogCache;
+import org.einkwiki.app.data.OfflinePackSelectionStore;
 import org.einkwiki.app.data.OfflinePackStore;
 import org.einkwiki.app.download.DownloadSnapshot;
 import org.einkwiki.app.download.PackDownloadManager;
+import org.einkwiki.app.library.OfflinePackAdapter;
+import org.einkwiki.app.library.PackRowModel;
 import org.einkwiki.app.reader.KiwixArchive;
 import org.einkwiki.app.reader.PackVerifier;
 import org.einkwiki.app.reader.SearchResult;
@@ -45,14 +51,24 @@ import org.einkwiki.app.update.VerifiedUpdate;
 
 import java.io.File;
 import java.io.IOException;
+import java.text.NumberFormat;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** Single-screen, animation-free offline Wikipedia reader for e-ink Android devices. */
+/** Single-activity, animation-free offline Wikipedia reader for e-ink Android devices. */
 public final class MainActivity extends Activity {
     private enum Screen {
+        HOME,
         LIBRARY,
         SEARCH,
         READER
@@ -97,10 +113,9 @@ public final class MainActivity extends Activity {
     private static final int MAX_TEXT_ZOOM = 150;
     private static final String UPDATE_CACHE_DIRECTORY = "updates";
 
-    private final OfflinePack pack = OfflinePack.DEVELOPMENT;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor(runnable -> {
-        Thread thread = new Thread(runnable, "einkwiki-io");
+        Thread thread = new Thread(runnable, "einkwiki-reader");
         thread.setPriority(Thread.NORM_PRIORITY - 1);
         return thread;
     });
@@ -109,11 +124,23 @@ public final class MainActivity extends Activity {
 
     private OfflinePackStore packStore;
     private PackDownloadManager packDownloads;
+    private KiwixCatalogClient catalogClient;
+    private OfflinePackCatalogCache catalogCache;
+    private InstalledPackSnapshotStore installedPackSnapshots;
+    private OfflinePackSelectionStore packSelection;
+    private OfflinePackAdapter packAdapter;
+    private final List<OfflinePack> catalogPacks = new ArrayList<>();
+    private final Map<String, OfflinePack> packsById = new HashMap<>();
+    private final Map<String, InvalidPackState> invalidPacks = new HashMap<>();
+    private final Map<String, String> packFailures = new HashMap<>();
+    private OfflinePack selectedPack;
     private KiwixArchive archive;
+    private String archivePackId = "";
     private SearchResultAdapter resultAdapter;
     private UpdatePackageVerifier updateVerifier;
     private SystemUpdateInstaller updateInstaller;
 
+    private View homeScreen;
     private View libraryScreen;
     private View searchScreen;
     private View readerScreen;
@@ -121,12 +148,10 @@ public final class MainActivity extends Activity {
     private Button libraryButton;
     private TextView toolbarTitle;
     private TextView messageBar;
-    private TextView storageStatus;
-    private TextView downloadDetail;
-    private EInkProgressView downloadProgress;
-    private Button downloadButton;
-    private Button openSearchButton;
-    private Button removePackButton;
+    private TextView catalogStatus;
+    private Button refreshCatalogButton;
+    private ListView offlinePackList;
+    private EditText homeSearchInput;
     private EditText searchInput;
     private Button searchButton;
     private TextView searchStatus;
@@ -136,16 +161,20 @@ public final class MainActivity extends Activity {
     private TextView updateStatus;
     private Button updateButton;
 
-    private Screen currentScreen = Screen.LIBRARY;
+    private Screen currentScreen = Screen.HOME;
+    private Screen searchReturnScreen = Screen.HOME;
     private boolean resumed;
     private boolean destroyed;
-    private boolean verificationRunning;
-    private boolean invalidLocalData;
-    private boolean invalidDataIsInstalledCandidate;
-    private boolean invalidDataCanRetryRegistry;
+    private boolean catalogRefreshAttempted;
+    private boolean catalogRefreshRunning;
+    private boolean packReconcilePending = true;
+    private String resolvingPackId = "";
+    private String verifyingPackId = "";
+    private String openingPackId = "";
+    private String deletingPackId = "";
     private boolean clearHistoryOnPageFinish;
-    private int lastRenderedProgress = -1;
     private int textZoom;
+    private int navigationGeneration;
     private int updateGeneration;
     private UpdateState updateState = UpdateState.IDLE;
     private String installedVersionName = BuildConfig.VERSION_NAME;
@@ -154,6 +183,18 @@ public final class MainActivity extends Activity {
     private UpdateClient activeUpdateClient;
     private Thread activeUpdateThread;
     private boolean waitingForInstallPermission;
+
+    private static final class InvalidPackState {
+        final boolean installedCandidate;
+        final boolean canRetryRegistry;
+        final String message;
+
+        InvalidPackState(boolean installedCandidate, boolean canRetryRegistry, String message) {
+            this.installedCandidate = installedCandidate;
+            this.canRetryRegistry = canRetryRegistry;
+            this.message = message;
+        }
+    }
 
     private final Runnable downloadPoll = new Runnable() {
         @Override
@@ -178,19 +219,31 @@ public final class MainActivity extends Activity {
 
         packStore = new OfflinePackStore(this);
         packDownloads = new PackDownloadManager(this, packStore);
+        catalogClient = new KiwixCatalogClient();
+        catalogCache = new OfflinePackCatalogCache(this);
+        installedPackSnapshots = new InstalledPackSnapshotStore(this);
+        packSelection = new OfflinePackSelectionStore(this);
+        try {
+            installedPackSnapshots.migrateDevelopmentPack(packStore);
+        } catch (IOException ignored) {
+            // The verified file is still recoverable; the registry is retried below.
+        }
+        loadLocalPackCatalog();
         UpdateCacheCleaner.clearAbandoned(this);
         updateVerifier = new UpdatePackageVerifier(this);
         updateInstaller = new SystemUpdateInstaller(this);
         resultAdapter = new SearchResultAdapter(this);
         searchResults.setAdapter(resultAdapter);
+        packAdapter = new OfflinePackAdapter(this, this::handlePackAction);
+        offlinePackList.setAdapter(packAdapter);
         textZoom = getPreferences(MODE_PRIVATE).getInt("reader_text_zoom", DEFAULT_TEXT_ZOOM);
 
         configureReader();
         bindActions();
         loadInstalledVersionName();
         renderUpdateSection();
-        showLibrary();
-        refreshLibraryState();
+        showHome();
+        beginPackReconciliation();
     }
 
     private void configureWindow() {
@@ -205,6 +258,7 @@ public final class MainActivity extends Activity {
     }
 
     private void bindViews() {
+        homeScreen = findViewById(R.id.home_screen);
         libraryScreen = findViewById(R.id.library_screen);
         searchScreen = findViewById(R.id.search_screen);
         readerScreen = findViewById(R.id.reader_screen);
@@ -212,20 +266,31 @@ public final class MainActivity extends Activity {
         libraryButton = findViewById(R.id.library_button);
         toolbarTitle = findViewById(R.id.toolbar_title);
         messageBar = findViewById(R.id.message_bar);
-        storageStatus = findViewById(R.id.storage_status);
-        downloadDetail = findViewById(R.id.download_detail);
-        downloadProgress = findViewById(R.id.download_progress);
-        downloadButton = findViewById(R.id.download_button);
-        openSearchButton = findViewById(R.id.open_search_button);
-        removePackButton = findViewById(R.id.remove_pack_button);
+        offlinePackList = findViewById(R.id.offline_pack_list);
+        offlinePackList.setItemsCanFocus(true);
+        View libraryHeader = getLayoutInflater().inflate(
+                R.layout.library_header,
+                offlinePackList,
+                false
+        );
+        View libraryFooter = getLayoutInflater().inflate(
+                R.layout.library_footer,
+                offlinePackList,
+                false
+        );
+        offlinePackList.addHeaderView(libraryHeader, null, false);
+        offlinePackList.addFooterView(libraryFooter, null, false);
+        catalogStatus = libraryHeader.findViewById(R.id.catalog_status);
+        refreshCatalogButton = libraryHeader.findViewById(R.id.refresh_catalog_button);
+        homeSearchInput = findViewById(R.id.home_search_input);
         searchInput = findViewById(R.id.search_input);
         searchButton = findViewById(R.id.search_button);
         searchStatus = findViewById(R.id.search_status);
         searchResults = findViewById(R.id.search_results);
         articleWebView = findViewById(R.id.article_webview);
-        currentVersionView = findViewById(R.id.current_version);
-        updateStatus = findViewById(R.id.update_status);
-        updateButton = findViewById(R.id.update_button);
+        currentVersionView = libraryFooter.findViewById(R.id.current_version);
+        updateStatus = libraryFooter.findViewById(R.id.update_status);
+        updateButton = libraryFooter.findViewById(R.id.update_button);
     }
 
     @SuppressWarnings("SetJavaScriptEnabled")
@@ -261,14 +326,24 @@ public final class MainActivity extends Activity {
         backButton.setOnClickListener(view -> handleBack());
         messageBar.setOnClickListener(view -> messageBar.setVisibility(View.GONE));
         libraryButton.setOnClickListener(view -> showLibrary());
-        downloadButton.setOnClickListener(view -> handleDownloadButton());
-        openSearchButton.setOnClickListener(view -> openSearch());
-        removePackButton.setOnClickListener(view -> confirmRemovePack());
+        refreshCatalogButton.setOnClickListener(view -> refreshCatalog());
         updateButton.setOnClickListener(view -> handleUpdateButton());
+        homeSearchInput.setOnEditorActionListener((view, actionId, event) -> {
+            if (actionId == EditorInfo.IME_ACTION_SEARCH
+                    || (event != null
+                    && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                    && event.getAction() == KeyEvent.ACTION_DOWN)) {
+                performHomeSearch();
+                return true;
+            }
+            return false;
+        });
         searchButton.setOnClickListener(view -> performSearch());
         searchInput.setOnEditorActionListener((view, actionId, event) -> {
             if (actionId == EditorInfo.IME_ACTION_SEARCH
-                    || (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER)) {
+                    || (event != null
+                    && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                    && event.getAction() == KeyEvent.ACTION_DOWN)) {
                 performSearch();
                 return true;
             }
@@ -300,8 +375,10 @@ public final class MainActivity extends Activity {
             }
             renderUpdateSection();
         }
-        refreshLibraryState();
-        scheduleDownloadPoll();
+        if (!packReconcilePending) {
+            refreshLibraryState();
+            scheduleDownloadPoll();
+        }
     }
 
     @Override
@@ -325,293 +402,811 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshLibraryState() {
-        if (verificationRunning) {
-            renderVerifying();
-            return;
+        OfflinePack tracked = packDownloads.trackedPack();
+        if (tracked == null) {
+            tracked = findPack(packDownloads.trackedPackId());
         }
-        if (packStore.isInstalled(pack)) {
-            // Recovers a crash between activation and removing the successful system row.
-            if (packDownloads.trackedId() != -1L) {
-                packDownloads.removeCompletedRecord();
+        DownloadSnapshot snapshot = packDownloads.query();
+        if (tracked != null && packStore.isInstalled(tracked)) {
+            try {
+                installedPackSnapshots.save(tracked);
+                packDownloads.removeCompletedRecord(tracked);
+                invalidPacks.remove(tracked.artifactId());
+            } catch (IOException error) {
+                invalidPacks.put(tracked.artifactId(), new InvalidPackState(
+                        true,
+                        true,
+                        readableError(error)
+                ));
             }
-            invalidLocalData = false;
-            invalidDataIsInstalledCandidate = false;
-            invalidDataCanRetryRegistry = false;
-            renderReady();
-            return;
-        }
-        if (packStore.hasInstalledCandidate(pack) && !invalidLocalData) {
-            verifyExistingCandidate();
-            return;
-        }
-        if (invalidLocalData) {
-            renderInvalidLocalData();
-            return;
+            snapshot = DownloadSnapshot.none();
+        } else if (tracked != null
+                && snapshot.state == DownloadSnapshot.State.SUCCESSFUL
+                && verifyingPackId.isEmpty()
+                && !invalidPacks.containsKey(tracked.artifactId())) {
+            verifyCompletedDownload(tracked);
+        } else if (snapshot.state == DownloadSnapshot.State.NONE
+                && packDownloads.trackedId() != -1L) {
+            packDownloads.clearTracking();
         }
 
-        DownloadSnapshot snapshot = packDownloads.query();
-        switch (snapshot.state) {
-            case PENDING:
-            case RUNNING:
-            case PAUSED:
-                renderActiveDownload(snapshot);
-                break;
-            case SUCCESSFUL:
-                verifyCompletedDownload();
-                break;
-            case FAILED:
-                renderDownloadFailure(snapshot.reason);
-                break;
-            case NONE:
-            default:
-                if (packDownloads.trackedId() != -1L) {
-                    packDownloads.clearTracking();
+        if (verifyingPackId.isEmpty()
+                && !snapshot.isActive()
+                && snapshot.state != DownloadSnapshot.State.SUCCESSFUL) {
+            for (OfflinePack candidate : catalogPacks) {
+                if (packStore.hasInstalledCandidate(candidate)
+                        && !packStore.isInstalled(candidate)
+                        && !invalidPacks.containsKey(candidate.artifactId())) {
+                    verifyExistingCandidate(candidate);
+                    break;
                 }
-                renderAvailable();
+            }
+        }
+        restoreSelectedPack();
+        renderPackRows();
+    }
+
+    private void handlePackAction(PackRowModel row, PackRowModel.Action action) {
+        if (packReconcilePending) {
+            showMessage("正在恢复离线书库状态，请稍候");
+            return;
+        }
+        OfflinePack target = findPack(row.packKey);
+        if (target == null) {
+            showMessage("这个离线包已经不在目录中，请更新目录");
+            return;
+        }
+        switch (action) {
+            case DOWNLOAD:
+            case RETRY:
+            case UPDATE:
+                requestPackDownload(target);
+                break;
+            case REDOWNLOAD:
+                repairAndDownload(target);
+                break;
+            case RETRY_REGISTRY:
+                repairAndDownload(target);
+                break;
+            case CANCEL:
+                cancelPackDownload(target);
+                break;
+            case SET_CURRENT:
+                selectPack(target, true);
+                break;
+            case OPEN_SEARCH:
+                openSearch(target, Screen.LIBRARY, false);
+                break;
+            case DELETE:
+                confirmRemovePack(target);
+                break;
+            default:
                 break;
         }
     }
 
-    private void handleDownloadButton() {
-        DownloadSnapshot snapshot = packDownloads.query();
-        if (snapshot.isActive()) {
-            packDownloads.cancelTrackedDownload();
-            try {
-                packStore.clearPartial(pack);
-            } catch (IOException ignored) {
-                // DownloadManager may still be completing its own exact-file cleanup.
+    private void requestPackDownload(OfflinePack target) {
+        if (!resolvingPackId.isEmpty() || !verifyingPackId.isEmpty()) {
+            showMessage("另一个离线包正在准备或校验，请稍候");
+            return;
+        }
+        long trackedId = packDownloads.trackedId();
+        if (trackedId != -1L && !packDownloads.isTracked(target)) {
+            OfflinePack active = packDownloads.trackedPack();
+            if (active == null) {
+                active = findPack(packDownloads.trackedPackId());
             }
-            invalidLocalData = false;
-            renderAvailable();
+            showMessage(active == null
+                    ? "另一个离线包正在下载，请先取消"
+                    : "正在下载《" + displayTitle(active) + "》，请先取消该下载");
+            return;
+        }
+        if (packDownloads.isTracked(target)) {
+            DownloadSnapshot snapshot = packDownloads.query(target);
+            if (snapshot.isActive() || snapshot.state == DownloadSnapshot.State.SUCCESSFUL) {
+                return;
+            }
+            packDownloads.removeCompletedRecord(target);
+        }
+        invalidPacks.remove(target.artifactId());
+        packFailures.remove(target.artifactId());
+        if (target.hasDownloadMetadata()) {
+            startResolvedDownload(target);
             return;
         }
 
-        if (invalidLocalData) {
-            if (invalidDataIsInstalledCandidate && invalidDataCanRetryRegistry) {
-                invalidLocalData = false;
-                invalidDataIsInstalledCandidate = false;
-                invalidDataCanRetryRegistry = false;
-                verifyExistingCandidate();
-                return;
-            }
+        resolvingPackId = target.artifactId();
+        renderPackRows();
+        scrollPackIntoView(target.artifactId());
+        List<OfflinePack> catalogSnapshot = new ArrayList<>(catalogPacks);
+        PackTaskCoordinator.execute(() -> {
             try {
-                if (invalidDataIsInstalledCandidate) {
-                    if (!packStore.deleteInstalled(pack)) {
-                        showMessage("文件仍在使用，暂时无法删除");
+                OfflinePack resolved = catalogClient.resolveDownloadMetadata(target);
+                catalogCache.upsert(
+                        catalogSnapshot,
+                        resolved,
+                        System.currentTimeMillis()
+                );
+                postToUi(() -> {
+                    if (!target.artifactId().equals(resolvingPackId)) {
                         return;
                     }
-                } else {
-                    packStore.clearPartial(pack);
-                }
-            } catch (IOException error) {
-                showMessage(error.getMessage());
-                return;
+                    resolvingPackId = "";
+                    applyPackCatalog(replacePack(catalogPacks, resolved));
+                    startResolvedDownload(resolved);
+                });
+            } catch (Exception error) {
+                postToUi(() -> {
+                    if (target.artifactId().equals(resolvingPackId)) {
+                        resolvingPackId = "";
+                        packFailures.put(target.artifactId(), readableError(error));
+                        renderPackRows();
+                        showMessage("无法准备下载：" + readableError(error));
+                    }
+                });
             }
-            invalidLocalData = false;
-            invalidDataIsInstalledCandidate = false;
-            invalidDataCanRetryRegistry = false;
-        }
-        startDownload();
+        });
     }
 
-    private void startDownload() {
+    private void startResolvedDownload(OfflinePack target) {
         try {
-            packDownloads.start(pack);
-            lastRenderedProgress = -1;
-            renderActiveDownload(packDownloads.query());
+            packDownloads.start(target);
+            packFailures.remove(target.artifactId());
+            renderPackRows();
+            scrollPackIntoView(target.artifactId());
             scheduleDownloadPoll();
         } catch (IOException | RuntimeException error) {
-            renderAvailable();
+            packFailures.put(target.artifactId(), readableError(error));
+            renderPackRows();
             showMessage(readableError(error));
         }
     }
 
-    private void verifyCompletedDownload() {
-        if (verificationRunning) {
+    private void cancelPackDownload(OfflinePack target) {
+        if (!packDownloads.cancel(target)) {
             return;
         }
-        verificationRunning = true;
-        renderVerifying();
-        ioExecutor.execute(() -> {
+        try {
+            packStore.clearPartial(target);
+        } catch (IOException ignored) {
+            // DownloadManager may still be finishing exact-file cleanup.
+        }
+        invalidPacks.remove(target.artifactId());
+        packFailures.remove(target.artifactId());
+        renderPackRows();
+    }
+
+    private void repairAndDownload(OfflinePack target) {
+        InvalidPackState invalid = invalidPacks.get(target.artifactId());
+        if (invalid == null) {
+            requestPackDownload(target);
+            return;
+        }
+        if (invalid.installedCandidate && invalid.canRetryRegistry) {
+            invalidPacks.remove(target.artifactId());
+            verifyExistingCandidate(target);
+            return;
+        }
+        deletingPackId = target.artifactId();
+        KiwixArchive archiveToClose = detachArchiveForMutation(target);
+        renderPackRows();
+        PackTaskCoordinator.execute(() -> {
+            try {
+                if (archiveToClose != null) {
+                    archiveToClose.close();
+                }
+                if (invalid.installedCandidate) {
+                    if (!packStore.deleteInstalled(target)) {
+                        throw new IOException("文件仍在使用，暂时无法删除");
+                    }
+                } else {
+                    packDownloads.removeCompletedRecord(target);
+                    packStore.clearPartial(target);
+                }
+                postToUi(() -> {
+                    deletingPackId = "";
+                    invalidPacks.remove(target.artifactId());
+                    requestPackDownload(target);
+                });
+            } catch (IOException error) {
+                postToUi(() -> {
+                    deletingPackId = "";
+                    renderPackRows();
+                    showMessage(readableError(error));
+                });
+            }
+        });
+    }
+
+    private void verifyCompletedDownload(OfflinePack target) {
+        if (!verifyingPackId.isEmpty()) {
+            return;
+        }
+        verifyingPackId = target.artifactId();
+        renderPackRows();
+        PackTaskCoordinator.execute(() -> {
             try {
                 PackVerifier.verifyAndActivate(
                         getApplicationContext(),
-                        pack,
+                        target,
                         packStore
                 );
-                packDownloads.removeCompletedRecord();
+                installedPackSnapshots.save(target);
+                packDownloads.removeCompletedRecord(target);
                 postToUi(() -> {
-                    verificationRunning = false;
-                    invalidLocalData = false;
-                    invalidDataIsInstalledCandidate = false;
-                    invalidDataCanRetryRegistry = false;
-                    renderReady();
+                    verifyingPackId = "";
+                    invalidPacks.remove(target.artifactId());
+                    packFailures.remove(target.artifactId());
+                    if (selectedPack == null || !packStore.isInstalled(selectedPack)) {
+                        selectPack(target, false);
+                    } else {
+                        refreshLibraryState();
+                    }
                 });
             } catch (Exception | LinkageError error) {
-                boolean installedCandidate = packStore.hasInstalledCandidate(pack);
+                boolean installedCandidate = packStore.hasInstalledCandidate(target);
                 boolean canRetryRegistry = installedCandidate
-                        && error instanceof OfflinePackStore.RegistryWriteException;
+                        && (error instanceof OfflinePackStore.RegistryWriteException
+                        || packStore.isInstalled(target));
                 postToUi(() -> {
-                    verificationRunning = false;
-                    invalidLocalData = true;
-                    invalidDataIsInstalledCandidate = installedCandidate;
-                    invalidDataCanRetryRegistry = canRetryRegistry;
-                    renderInvalidLocalData();
+                    verifyingPackId = "";
+                    invalidPacks.put(target.artifactId(), new InvalidPackState(
+                            installedCandidate,
+                            canRetryRegistry,
+                            readableError(error)
+                    ));
+                    renderPackRows();
                     showMessage(readableError(error));
                 });
             }
         });
     }
 
-    private void verifyExistingCandidate() {
-        if (verificationRunning) {
+    private void verifyExistingCandidate(OfflinePack target) {
+        if (!verifyingPackId.isEmpty()) {
             return;
         }
-        verificationRunning = true;
-        renderVerifying();
-        ioExecutor.execute(() -> {
+        verifyingPackId = target.artifactId();
+        renderPackRows();
+        PackTaskCoordinator.execute(() -> {
             try {
                 PackVerifier.verifyInstalled(
                         getApplicationContext(),
-                        pack,
+                        target,
                         packStore
                 );
+                installedPackSnapshots.save(target);
                 postToUi(() -> {
-                    verificationRunning = false;
-                    invalidLocalData = false;
-                    invalidDataIsInstalledCandidate = false;
-                    invalidDataCanRetryRegistry = false;
-                    packDownloads.removeCompletedRecord();
-                    renderReady();
+                    verifyingPackId = "";
+                    invalidPacks.remove(target.artifactId());
+                    packDownloads.removeCompletedRecord(target);
+                    if (selectedPack == null || !packStore.isInstalled(selectedPack)) {
+                        selectPack(target, false);
+                    } else {
+                        refreshLibraryState();
+                    }
                 });
             } catch (Exception | LinkageError error) {
                 boolean canRetryRegistry = error
-                        instanceof OfflinePackStore.RegistryWriteException;
+                        instanceof OfflinePackStore.RegistryWriteException
+                        || packStore.isInstalled(target);
                 postToUi(() -> {
-                    verificationRunning = false;
-                    invalidLocalData = true;
-                    invalidDataIsInstalledCandidate = true;
-                    invalidDataCanRetryRegistry = canRetryRegistry;
-                    renderInvalidLocalData();
+                    verifyingPackId = "";
+                    invalidPacks.put(target.artifactId(), new InvalidPackState(
+                            true,
+                            canRetryRegistry,
+                            readableError(error)
+                    ));
+                    renderPackRows();
                     showMessage(readableError(error));
                 });
             }
         });
     }
 
-    private void renderAvailable() {
-        storageStatus.setText("尚未下载");
-        downloadDetail.setText(getString(R.string.download_network_detail, pack.humanSize()));
-        downloadProgress.setVisibility(View.GONE);
-        downloadButton.setVisibility(View.VISIBLE);
-        downloadButton.setEnabled(true);
-        downloadButton.setText(R.string.download_pack);
-        openSearchButton.setVisibility(View.GONE);
-        removePackButton.setVisibility(View.GONE);
-    }
-
-    private void renderActiveDownload(DownloadSnapshot snapshot) {
-        String state;
-        if (snapshot.state == DownloadSnapshot.State.PAUSED) {
-            state = pausedReason(snapshot.reason);
-        } else if (snapshot.state == DownloadSnapshot.State.PENDING) {
-            state = "等待系统开始下载";
-        } else {
-            state = "正在下载";
+    private void renderPackRows() {
+        if (packAdapter == null) {
+            return;
         }
-        int percent = snapshot.percent();
-        storageStatus.setText(state);
-        downloadProgress.setVisibility(View.VISIBLE);
-        if (percent != lastRenderedProgress) {
-            lastRenderedProgress = percent;
-            downloadProgress.setProgress(percent);
-            String total = snapshot.totalBytes > 0
-                    ? OfflinePack.formatBytes(snapshot.totalBytes)
-                    : pack.humanSize();
-            downloadDetail.setText(getString(
-                    R.string.download_detail_format,
-                    percent,
-                    OfflinePack.formatBytes(snapshot.downloadedBytes),
-                    total
+        DownloadSnapshot activeSnapshot = packDownloads.query();
+        String activeId = packDownloads.trackedPackId();
+        List<OfflinePack> sorted = new ArrayList<>(catalogPacks);
+        Map<String, Boolean> installedState = new HashMap<>();
+        for (OfflinePack candidate : sorted) {
+            installedState.put(candidate.artifactId(), packStore.isInstalled(candidate));
+        }
+        sorted.sort(packComparator(activeId, installedState));
+        List<PackRowModel> rows = new ArrayList<>(sorted.size());
+        for (OfflinePack candidate : sorted) {
+            rows.add(rowForPack(
+                    candidate,
+                    Boolean.TRUE.equals(installedState.get(candidate.artifactId())),
+                    activeId,
+                    activeSnapshot
             ));
-            downloadProgress.setContentDescription(
-                    getString(R.string.download_progress_format, percent)
-            );
         }
-        downloadButton.setVisibility(View.VISIBLE);
-        downloadButton.setEnabled(true);
-        downloadButton.setText(R.string.cancel_download);
-        openSearchButton.setVisibility(View.GONE);
-        removePackButton.setVisibility(View.GONE);
+        packAdapter.submitRows(rows, offlinePackList);
     }
 
-    private void renderVerifying() {
-        storageStatus.setText("正在校验离线包");
-        downloadDetail.setText(R.string.verifying_detail);
-        downloadProgress.setVisibility(View.VISIBLE);
-        downloadProgress.setProgress(100);
-        downloadButton.setVisibility(View.VISIBLE);
-        downloadButton.setEnabled(false);
-        downloadButton.setText("正在校验");
-        openSearchButton.setVisibility(View.GONE);
-        removePackButton.setVisibility(View.GONE);
+    private void scrollPackIntoView(String artifactId) {
+        List<PackRowModel> rows = packAdapter.rows();
+        for (int index = 0; index < rows.size(); index++) {
+            if (rows.get(index).packKey.equals(artifactId)) {
+                int position = offlinePackList.getHeaderViewsCount() + index;
+                offlinePackList.setSelectionFromTop(position, 0);
+                return;
+            }
+        }
     }
 
-    private void renderReady() {
-        storageStatus.setText("可以离线阅读");
-        downloadDetail.setText(getString(R.string.ready_detail, pack.version, pack.humanSize()));
-        downloadProgress.setVisibility(View.GONE);
-        downloadButton.setVisibility(View.GONE);
-        openSearchButton.setVisibility(View.VISIBLE);
-        openSearchButton.setEnabled(true);
-        removePackButton.setVisibility(View.VISIBLE);
-        removePackButton.setEnabled(true);
-    }
+    private PackRowModel rowForPack(
+            OfflinePack candidate,
+            boolean installed,
+            String activeId,
+            DownloadSnapshot activeSnapshot
+    ) {
+        String id = candidate.artifactId();
+        boolean current = installed
+                && selectedPack != null
+                && id.equals(selectedPack.artifactId());
+        String badge = current ? "当前" : installed ? "已下载" : recommendedRank(candidate) < 100
+                ? "推荐" : "";
+        String metadata = candidate.version + " · " + candidate.humanSize()
+                + " · " + flavourLabel(candidate.flavour);
+        String detail = candidate.articleCount >= 0L
+                ? NumberFormat.getIntegerInstance(Locale.CHINA).format(candidate.articleCount)
+                + " 篇条目"
+                : candidate.description;
+        PackRowModel.State state;
+        String status;
+        int progress = PackRowModel.NO_PROGRESS;
 
-    private void renderDownloadFailure(int reason) {
-        storageStatus.setText("下载失败");
-        downloadDetail.setText(downloadFailureReason(reason));
-        downloadProgress.setVisibility(View.GONE);
-        downloadButton.setVisibility(View.VISIBLE);
-        downloadButton.setEnabled(true);
-        downloadButton.setText(R.string.retry_download);
-        openSearchButton.setVisibility(View.GONE);
-        removePackButton.setVisibility(View.GONE);
-    }
-
-    private void renderInvalidLocalData() {
-        storageStatus.setText("离线包校验失败");
-        if (invalidDataCanRetryRegistry) {
-            downloadDetail.setText("文件已经校验通过，但状态保存失败；可直接重试，无需重新下载。");
+        if (id.equals(deletingPackId)) {
+            state = PackRowModel.State.DELETING;
+            status = "正在删除离线包";
+        } else if (id.equals(resolvingPackId)) {
+            state = PackRowModel.State.PREPARING;
+            status = "正在读取下载校验信息";
+        } else if (id.equals(openingPackId)) {
+            state = PackRowModel.State.PREPARING;
+            status = "正在打开本地搜索索引";
+        } else if (id.equals(verifyingPackId)
+                || (id.equals(activeId)
+                && activeSnapshot.state == DownloadSnapshot.State.SUCCESSFUL)) {
+            state = PackRowModel.State.VERIFYING;
+            status = "正在校验大小、SHA-256 和 ZIM 结构";
+        } else if (invalidPacks.containsKey(id)) {
+            InvalidPackState invalid = invalidPacks.get(id);
+            state = invalid.canRetryRegistry
+                    ? PackRowModel.State.REGISTRY_FAILED
+                    : PackRowModel.State.VERIFICATION_FAILED;
+            status = invalid.canRetryRegistry ? "校验通过，状态保存失败" : "离线包校验失败";
+            detail = invalid.message;
+        } else if (installed) {
+            state = current ? PackRowModel.State.CURRENT : PackRowModel.State.INSTALLED;
+            status = current ? "当前搜索库 · 已校验" : "已下载 · 已校验";
+        } else if (id.equals(activeId)) {
+            switch (activeSnapshot.state) {
+                case PENDING:
+                    state = PackRowModel.State.PENDING;
+                    status = "等待系统开始下载";
+                    progress = activeSnapshot.percent();
+                    break;
+                case RUNNING:
+                    state = PackRowModel.State.DOWNLOADING;
+                    status = "正在下载";
+                    progress = activeSnapshot.percent();
+                    break;
+                case PAUSED:
+                    state = PackRowModel.State.PAUSED;
+                    status = pausedReason(activeSnapshot.reason);
+                    progress = activeSnapshot.percent();
+                    break;
+                case FAILED:
+                    state = PackRowModel.State.DOWNLOAD_FAILED;
+                    status = "下载失败";
+                    detail = downloadFailureReason(activeSnapshot.reason);
+                    break;
+                default:
+                    state = PackRowModel.State.AVAILABLE;
+                    status = "尚未下载";
+                    break;
+            }
+            if (activeSnapshot.state == DownloadSnapshot.State.PENDING
+                    || activeSnapshot.state == DownloadSnapshot.State.RUNNING
+                    || activeSnapshot.state == DownloadSnapshot.State.PAUSED) {
+                String total = activeSnapshot.totalBytes > 0
+                        ? OfflinePack.formatBytes(activeSnapshot.totalBytes)
+                        : candidate.humanSize();
+                detail = progress + "% · " + total;
+            }
+        } else if (packFailures.containsKey(id)) {
+            state = PackRowModel.State.DOWNLOAD_FAILED;
+            status = "无法开始下载";
+            detail = packFailures.get(id);
+        } else if ((!activeId.isEmpty() && packDownloads.trackedId() != -1L)
+                || !resolvingPackId.isEmpty()
+                || !verifyingPackId.isEmpty()) {
+            state = PackRowModel.State.DOWNLOAD_BLOCKED;
+            status = "另一个离线包正在下载或校验";
         } else {
-            downloadDetail.setText("保留了问题文件；点击下方按钮后会删除并重新下载。");
+            state = PackRowModel.State.AVAILABLE;
+            status = "尚未下载";
         }
-        downloadProgress.setVisibility(View.GONE);
-        downloadButton.setVisibility(View.VISIBLE);
-        downloadButton.setEnabled(true);
-        downloadButton.setText(invalidDataCanRetryRegistry ? "重试保存状态" : "删除并重新下载");
-        openSearchButton.setVisibility(View.GONE);
-        removePackButton.setVisibility(View.GONE);
+        return new PackRowModel(
+                id,
+                displayTitle(candidate),
+                metadata,
+                badge,
+                status,
+                detail,
+                state,
+                progress
+        );
     }
 
-    private void openSearch() {
-        if (!packStore.isInstalled(pack)) {
+    private void loadLocalPackCatalog() {
+        OfflinePackCatalogCache.Snapshot cached = catalogCache.loadSnapshot();
+        List<OfflinePack> initial = new ArrayList<>(cached.packs);
+        if (initial.isEmpty()) {
+            initial.add(OfflinePack.DEVELOPMENT);
+            catalogStatus.setText(R.string.catalog_builtin_status);
+        } else {
+            catalogStatus.setText(R.string.catalog_cache_status);
+        }
+        for (OfflinePack installed : installedPackSnapshots.loadAll()) {
+            initial = replacePack(initial, installed);
+        }
+        applyPackCatalog(initial);
+    }
+
+    private void applyPackCatalog(List<OfflinePack> packs) {
+        LinkedHashMap<String, OfflinePack> merged = new LinkedHashMap<>();
+        for (OfflinePack candidate : packs) {
+            OfflinePack previous = packsById.get(candidate.artifactId());
+            merged.put(candidate.artifactId(), candidate.hasDownloadMetadata()
+                    ? candidate
+                    : previous != null && previous.hasDownloadMetadata() ? previous : candidate);
+        }
+        for (OfflinePack installed : installedPackSnapshots.loadAll()) {
+            merged.put(installed.artifactId(), installed);
+        }
+        OfflinePack tracked = packDownloads.trackedPack();
+        if (tracked != null) {
+            merged.put(tracked.artifactId(), tracked);
+        }
+        catalogPacks.clear();
+        catalogPacks.addAll(merged.values());
+        packsById.clear();
+        for (OfflinePack candidate : catalogPacks) {
+            packsById.put(candidate.artifactId(), candidate);
+        }
+        restoreSelectedPack();
+        renderPackRows();
+    }
+
+    private static List<OfflinePack> replacePack(
+            List<OfflinePack> source,
+            OfflinePack replacement
+    ) {
+        List<OfflinePack> result = new ArrayList<>(source.size() + 1);
+        boolean replaced = false;
+        for (OfflinePack candidate : source) {
+            if (candidate.artifactId().equals(replacement.artifactId())) {
+                if (!replaced) {
+                    result.add(replacement);
+                    replaced = true;
+                }
+            } else {
+                result.add(candidate);
+            }
+        }
+        if (!replaced) {
+            result.add(replacement);
+        }
+        return result;
+    }
+
+    private OfflinePack findPack(String artifactId) {
+        return artifactId == null ? null : packsById.get(artifactId);
+    }
+
+    private void restoreSelectedPack() {
+        String selectedId = packSelection.selectedArtifactId();
+        OfflinePack stored = findPack(selectedId);
+        if (stored != null && packStore.isInstalled(stored)) {
+            selectedPack = stored;
+            return;
+        }
+        selectedPack = null;
+        List<OfflinePack> installed = new ArrayList<>();
+        for (OfflinePack candidate : catalogPacks) {
+            if (packStore.isInstalled(candidate)) {
+                installed.add(candidate);
+                if (installedPackSnapshots.find(candidate.artifactId()) == null) {
+                    try {
+                        installedPackSnapshots.save(candidate);
+                    } catch (IOException ignored) {
+                        // The verified file remains usable and is retried on the next refresh.
+                    }
+                }
+            }
+        }
+        installed.sort(Comparator.comparing(OfflinePack::artifactId));
+        if (!installed.isEmpty()) {
+            selectedPack = installed.get(0);
+            try {
+                packSelection.select(selectedPack);
+            } catch (IOException ignored) {
+                // Search remains usable for this process; persistence can be retried by the user.
+            }
+        } else if (!selectedId.isEmpty()) {
+            try {
+                packSelection.clear();
+            } catch (IOException ignored) {
+                // An invalid selection never makes an unverified file usable.
+            }
+        }
+    }
+
+    private void selectPack(OfflinePack target, boolean announce) {
+        if (!packStore.isInstalled(target)) {
+            showMessage("这个离线包尚未完成校验");
+            return;
+        }
+        String previous = selectedPack == null ? "" : selectedPack.artifactId();
+        try {
+            packSelection.select(target);
+        } catch (IOException error) {
+            showMessage(readableError(error));
+            return;
+        }
+        selectedPack = target;
+        if (!previous.equals(target.artifactId())) {
+            invalidateArchiveSession();
+        }
+        renderPackRows();
+        if (announce) {
+            showMessage("已将《" + displayTitle(target) + "》设为当前搜索库");
+        }
+    }
+
+    private Comparator<OfflinePack> packComparator(
+            String activeId,
+            Map<String, Boolean> installedState
+    ) {
+        return Comparator
+                .comparingInt((OfflinePack candidate) -> packGroup(
+                        candidate,
+                        activeId,
+                        Boolean.TRUE.equals(installedState.get(candidate.artifactId()))
+                ))
+                .thenComparingInt(MainActivity::recommendedRank)
+                .thenComparingLong(candidate -> {
+                    long bytes = candidate.hasDownloadMetadata()
+                            ? candidate.expectedBytes : candidate.advertisedBytes;
+                    return bytes < 0L ? Long.MAX_VALUE : bytes;
+                })
+                .thenComparing(MainActivity::displayTitle)
+                .thenComparing(OfflinePack::artifactId);
+    }
+
+    private int packGroup(OfflinePack candidate, String activeId, boolean installed) {
+        if (selectedPack != null
+                && candidate.artifactId().equals(selectedPack.artifactId())
+                && installed) {
+            return 0;
+        }
+        if (installed) {
+            return 1;
+        }
+        if (candidate.artifactId().equals(activeId)
+                || candidate.artifactId().equals(resolvingPackId)
+                || candidate.artifactId().equals(verifyingPackId)
+                || invalidPacks.containsKey(candidate.artifactId())) {
+            return 2;
+        }
+        return recommendedRank(candidate) < 100 ? 3 : 4;
+    }
+
+    private static int recommendedRank(OfflinePack candidate) {
+        if ("wikipedia_zh_chemistry_nopic".equals(candidate.logicalId)) {
+            return 0;
+        }
+        if ("wikipedia_zh_top_nopic".equals(candidate.logicalId)) {
+            return 1;
+        }
+        if ("wikipedia_zh_all_nopic".equals(candidate.logicalId)) {
+            return 2;
+        }
+        return 100;
+    }
+
+    private static String flavourLabel(String flavour) {
+        switch (flavour) {
+            case "mini":
+                return "精简无图";
+            case "nopic":
+                return "完整正文无图";
+            case "maxi":
+                return "完整正文含图";
+            default:
+                return flavour;
+        }
+    }
+
+    private static String displayTitle(OfflinePack candidate) {
+        String id = candidate.logicalId;
+        String scope;
+        if (id.contains("_all_")) {
+            scope = "全部条目";
+        } else if (id.contains("_top_")) {
+            scope = "热门条目";
+        } else if (id.contains("_chemistry_")) {
+            scope = "化学";
+        } else if (id.contains("_physics_")) {
+            scope = "物理";
+        } else if (id.contains("_mathematics_")) {
+            scope = "数学";
+        } else if (id.contains("_movies_")) {
+            scope = "电影";
+        } else if (id.contains("_computer_")) {
+            scope = "计算机";
+        } else if (id.contains("_medicine_")) {
+            scope = "医学";
+        } else if (id.contains("_history_")) {
+            scope = "历史";
+        } else if (id.contains("_geography_")) {
+            scope = "地理";
+        } else if (id.contains("_molcell_")) {
+            scope = "分子与细胞生物学";
+        } else if (id.contains("_football_")) {
+            scope = "足球";
+        } else if (id.contains("_basketball_")) {
+            scope = "篮球";
+        } else {
+            scope = candidate.title;
+        }
+        return "中文维基百科 · " + scope + " · " + flavourLabel(candidate.flavour);
+    }
+
+    private void refreshCatalog() {
+        if (packReconcilePending) {
+            showMessage("正在恢复离线书库状态，请稍候");
+            return;
+        }
+        if (catalogRefreshRunning) {
+            return;
+        }
+        catalogRefreshAttempted = true;
+        catalogRefreshRunning = true;
+        catalogStatus.setText(R.string.catalog_refreshing);
+        refreshCatalogButton.setEnabled(false);
+        List<OfflinePack> previous = new ArrayList<>(catalogPacks);
+        Set<String> preservedIds = new HashSet<>(invalidPacks.keySet());
+        preservedIds.add(packDownloads.trackedPackId());
+        preservedIds.add(resolvingPackId);
+        preservedIds.add(verifyingPackId);
+        preservedIds.remove("");
+        PackTaskCoordinator.execute(() -> {
+            try {
+                List<OfflinePack> remote = catalogClient.fetchChineseWikipedia();
+                List<OfflinePack> latestPrevious = catalogCache.load();
+                if (latestPrevious.isEmpty()) {
+                    latestPrevious = previous;
+                }
+                Set<String> latestPreservedIds = new HashSet<>(preservedIds);
+                OfflinePack activeDownload = packDownloads.trackedPack();
+                if (activeDownload != null) {
+                    latestPreservedIds.add(activeDownload.artifactId());
+                    latestPrevious = replacePack(latestPrevious, activeDownload);
+                }
+                List<OfflinePack> merged = mergeRemoteCatalog(
+                        remote,
+                        latestPrevious,
+                        latestPreservedIds
+                );
+                long savedAt = System.currentTimeMillis();
+                catalogCache.save(merged, savedAt);
+                postToUi(() -> {
+                    catalogRefreshRunning = false;
+                    refreshCatalogButton.setEnabled(true);
+                    applyPackCatalog(merged);
+                    catalogStatus.setText(getString(
+                            R.string.catalog_ready_format,
+                            remote.size()
+                    ));
+                });
+            } catch (Exception error) {
+                postToUi(() -> {
+                    catalogRefreshRunning = false;
+                    refreshCatalogButton.setEnabled(true);
+                    catalogStatus.setText(R.string.catalog_refresh_failed);
+                    showMessage("目录更新失败：" + readableError(error));
+                });
+            }
+        });
+    }
+
+    private static List<OfflinePack> mergeRemoteCatalog(
+            List<OfflinePack> remote,
+            List<OfflinePack> previous,
+            Set<String> preservedIds
+    ) {
+        Map<String, OfflinePack> previousById = new HashMap<>();
+        for (OfflinePack candidate : previous) {
+            previousById.put(candidate.artifactId(), candidate);
+        }
+        List<OfflinePack> merged = new ArrayList<>(remote.size());
+        for (OfflinePack candidate : remote) {
+            OfflinePack cached = previousById.get(candidate.artifactId());
+            merged.add(cached != null && cached.hasDownloadMetadata() ? cached : candidate);
+        }
+        for (OfflinePack candidate : previous) {
+            if (preservedIds.contains(candidate.artifactId())
+                    && merged.stream().noneMatch(item -> item.artifactId()
+                    .equals(candidate.artifactId()))) {
+                merged.add(candidate);
+            }
+        }
+        return merged;
+    }
+
+    private void performHomeSearch() {
+        if (packReconcilePending) {
+            showMessage("正在恢复离线书库状态，请稍候");
+            return;
+        }
+        String term = homeSearchInput.getText().toString().trim();
+        if (term.isEmpty()) {
+            return;
+        }
+        restoreSelectedPack();
+        if (selectedPack == null || !packStore.isInstalled(selectedPack)) {
+            showMessage(getString(R.string.home_pack_required));
+            return;
+        }
+        searchInput.setText(term);
+        searchInput.setSelection(term.length());
+        openSearch(selectedPack, Screen.HOME, true);
+    }
+
+    private void openSearch(
+            OfflinePack target,
+            Screen returnScreen,
+            boolean searchImmediately
+    ) {
+        if (packReconcilePending) {
+            showMessage("正在恢复离线书库状态，请稍候");
+            return;
+        }
+        if (!packStore.isInstalled(target)) {
             showMessage("请先完成离线包下载和校验");
             return;
         }
-        if (archive != null) {
+        if (archive != null && target.artifactId().equals(archivePackId)) {
+            searchReturnScreen = returnScreen;
             showSearch();
+            if (searchImmediately) {
+                performSearch();
+            }
             return;
         }
 
-        openSearchButton.setEnabled(false);
-        removePackButton.setEnabled(false);
-        storageStatus.setText("正在打开离线包");
-        downloadDetail.setText("首次打开需要加载本地搜索索引…");
+        if (archive != null) {
+            invalidateArchiveSession();
+        }
+        Screen requestScreen = currentScreen;
+        int navigationAtRequest = navigationGeneration;
+        homeSearchInput.setEnabled(false);
+        hideKeyboard();
+        showMessage(getString(R.string.opening_offline_pack));
+        openingPackId = target.artifactId();
+        renderPackRows();
         int generation = archiveGeneration.incrementAndGet();
         ioExecutor.execute(() -> {
             try {
-                File file = packStore.installedFile(pack);
+                File file = packStore.installedFile(target);
                 KiwixArchive opened = KiwixArchive.open(getApplicationContext(), file);
                 if (generation != archiveGeneration.get()) {
                     opened.close();
@@ -623,16 +1218,30 @@ public final class MainActivity extends Activity {
                         return;
                     }
                     archive = opened;
+                    archivePackId = target.artifactId();
+                    openingPackId = "";
                     attachArchiveToWebView();
-                    openSearchButton.setEnabled(true);
-                    removePackButton.setEnabled(true);
+                    homeSearchInput.setEnabled(true);
+                    renderPackRows();
+                    messageBar.setVisibility(View.GONE);
+                    if (currentScreen != requestScreen
+                            || navigationGeneration != navigationAtRequest) {
+                        return;
+                    }
+                    searchReturnScreen = returnScreen;
                     showSearch();
+                    if (searchImmediately) {
+                        performSearch();
+                    }
                 });
             } catch (Exception | LinkageError error) {
                 postToUi(() -> {
-                    openSearchButton.setEnabled(true);
-                    removePackButton.setEnabled(true);
-                    renderReady();
+                    if (generation != archiveGeneration.get()) {
+                        return;
+                    }
+                    openingPackId = "";
+                    homeSearchInput.setEnabled(true);
+                    renderPackRows();
                     showMessage("无法打开离线包：" + readableError(error));
                 });
             }
@@ -683,17 +1292,23 @@ public final class MainActivity extends Activity {
             showMessage("离线包尚未打开");
             return;
         }
+        KiwixArchive searchArchive = archive;
+        String searchArchiveId = archivePackId;
         hideKeyboard();
         int generation = searchGeneration.incrementAndGet();
         searchButton.setEnabled(false);
+        resultAdapter.replace(null);
+        searchResults.setSelection(0);
         searchStatus.setText(R.string.searching);
         ioExecutor.execute(() -> {
             List<SearchResult> results;
             try {
-                results = archive.search(term, SEARCH_LIMIT);
+                results = searchArchive.search(term, SEARCH_LIMIT);
             } catch (RuntimeException error) {
                 postToUi(() -> {
-                    if (generation == searchGeneration.get()) {
+                    if (generation == searchGeneration.get()
+                            && searchArchive == archive
+                            && searchArchiveId.equals(archivePackId)) {
                         searchButton.setEnabled(true);
                         searchStatus.setText(getString(
                                 R.string.search_failed_format,
@@ -704,7 +1319,9 @@ public final class MainActivity extends Activity {
                 return;
             }
             postToUi(() -> {
-                if (generation != searchGeneration.get()) {
+                if (generation != searchGeneration.get()
+                        || searchArchive != archive
+                        || !searchArchiveId.equals(archivePackId)) {
                     return;
                 }
                 searchButton.setEnabled(true);
@@ -728,7 +1345,9 @@ public final class MainActivity extends Activity {
             return;
         }
         hideKeyboard();
+        navigationGeneration++;
         currentScreen = Screen.READER;
+        homeScreen.setVisibility(View.GONE);
         libraryScreen.setVisibility(View.GONE);
         searchScreen.setVisibility(View.GONE);
         readerScreen.setVisibility(View.VISIBLE);
@@ -739,20 +1358,44 @@ public final class MainActivity extends Activity {
         articleWebView.loadUrl(archive.contentUrl(result.path));
     }
 
-    private void showLibrary() {
-        currentScreen = Screen.LIBRARY;
-        libraryScreen.setVisibility(View.VISIBLE);
+    private void showHome() {
+        navigationGeneration++;
+        currentScreen = Screen.HOME;
+        homeScreen.setVisibility(View.VISIBLE);
+        libraryScreen.setVisibility(View.GONE);
         searchScreen.setVisibility(View.GONE);
         readerScreen.setVisibility(View.GONE);
         backButton.setVisibility(View.GONE);
+        libraryButton.setVisibility(View.VISIBLE);
+        toolbarTitle.setText(R.string.app_name);
+        homeSearchInput.setEnabled(true);
+        homeScreen.requestFocus();
+        hideKeyboard();
+    }
+
+    private void showLibrary() {
+        navigationGeneration++;
+        currentScreen = Screen.LIBRARY;
+        homeScreen.setVisibility(View.GONE);
+        libraryScreen.setVisibility(View.VISIBLE);
+        searchScreen.setVisibility(View.GONE);
+        readerScreen.setVisibility(View.GONE);
+        backButton.setVisibility(View.VISIBLE);
         libraryButton.setVisibility(View.GONE);
         toolbarTitle.setText(R.string.library_title);
         hideKeyboard();
-        refreshLibraryState();
+        if (!packReconcilePending) {
+            refreshLibraryState();
+        }
+        if (!packReconcilePending && !catalogRefreshAttempted) {
+            refreshCatalog();
+        }
     }
 
     private void showSearch() {
+        navigationGeneration++;
         currentScreen = Screen.SEARCH;
+        homeScreen.setVisibility(View.GONE);
         libraryScreen.setVisibility(View.GONE);
         searchScreen.setVisibility(View.VISIBLE);
         readerScreen.setVisibility(View.GONE);
@@ -769,7 +1412,13 @@ public final class MainActivity extends Activity {
                 showSearch();
             }
         } else if (currentScreen == Screen.SEARCH) {
-            showLibrary();
+            if (searchReturnScreen == Screen.LIBRARY) {
+                showLibrary();
+            } else {
+                showHome();
+            }
+        } else if (currentScreen == Screen.LIBRARY) {
+            showHome();
         } else {
             finish();
         }
@@ -781,22 +1430,34 @@ public final class MainActivity extends Activity {
     }
 
     @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (currentScreen == Screen.READER && keyCode == KeyEvent.KEYCODE_PAGE_UP) {
-            pageBy(-1);
-            return true;
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        int keyCode = event.getKeyCode();
+        if (keyCode == KeyEvent.KEYCODE_PAGE_UP || keyCode == KeyEvent.KEYCODE_PAGE_DOWN) {
+            int direction = keyCode == KeyEvent.KEYCODE_PAGE_UP ? -1 : 1;
+            if (currentScreen == Screen.READER || currentScreen == Screen.LIBRARY) {
+                if (event.getAction() == KeyEvent.ACTION_UP) {
+                    if (currentScreen == Screen.READER) {
+                        pageBy(direction);
+                    } else {
+                        pageLibraryBy(direction);
+                    }
+                }
+                return true;
+            }
         }
-        if (currentScreen == Screen.READER && keyCode == KeyEvent.KEYCODE_PAGE_DOWN) {
-            pageBy(1);
-            return true;
-        }
-        return super.onKeyDown(keyCode, event);
+        return super.dispatchKeyEvent(event);
     }
 
     private void pageBy(int direction) {
         int overlap = Math.round(48 * getResources().getDisplayMetrics().density);
         int distance = Math.max(1, articleWebView.getHeight() - overlap);
         articleWebView.scrollBy(0, direction * distance);
+    }
+
+    private void pageLibraryBy(int direction) {
+        int overlap = Math.round(48 * getResources().getDisplayMetrics().density);
+        int distance = Math.max(1, offlinePackList.getHeight() - overlap);
+        offlinePackList.scrollListBy(direction * distance);
     }
 
     private void adjustTextZoom(int delta) {
@@ -806,60 +1467,158 @@ public final class MainActivity extends Activity {
         showMessage("正文缩放 " + textZoom + "%");
     }
 
-    private void confirmRemovePack() {
+    private void confirmRemovePack(OfflinePack target) {
+        String consequence = "删除后需要重新下载才能使用这个搜索库。";
+        if (selectedPack != null
+                && target.artifactId().equals(selectedPack.artifactId())) {
+            OfflinePack replacement = firstInstalledExcept(target);
+            consequence = replacement == null
+                    ? "删除后将没有可用的首页搜索库。"
+                    : "删除后将自动改用《" + displayTitle(replacement) + "》。";
+        }
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle(R.string.confirm_remove_title)
-                .setMessage(R.string.confirm_remove_message)
+                .setMessage("将删除《" + displayTitle(target) + "》。" + consequence)
                 .setNegativeButton(R.string.cancel, null)
-                .setPositiveButton(R.string.remove, (ignored, which) -> removePack())
+                .setPositiveButton(R.string.remove, (ignored, which) -> removePack(target))
                 .create();
         Window window = dialog.getWindow();
         if (window != null) {
             window.setWindowAnimations(0);
         }
         dialog.show();
+        configureDialogButton(dialog.getButton(AlertDialog.BUTTON_NEGATIVE));
+        configureDialogButton(dialog.getButton(AlertDialog.BUTTON_POSITIVE));
     }
 
-    private void removePack() {
-        showLibrary();
-        storageStatus.setText("正在删除离线包");
-        openSearchButton.setEnabled(false);
-        removePackButton.setEnabled(false);
-        archiveGeneration.incrementAndGet();
-        searchGeneration.incrementAndGet();
-        packDownloads.cancelTrackedDownload();
-        articleWebView.stopLoading();
-        articleWebView.setWebViewClient(new WebViewClient());
-        articleWebView.loadUrl("about:blank");
-        resultAdapter.replace(null);
+    private void configureDialogButton(Button button) {
+        if (button == null) {
+            return;
+        }
+        button.setAllCaps(false);
+        button.setTextColor(getColor(R.color.ink_black));
+        button.setBackgroundResource(R.drawable.button_background);
+        button.setStateListAnimator(null);
+        button.setMinHeight(getResources().getDimensionPixelSize(R.dimen.touch_target));
+    }
 
-        KiwixArchive toClose = archive;
-        archive = null;
-        ioExecutor.execute(() -> {
-            if (toClose != null) {
-                toClose.close();
+    private OfflinePack firstInstalledExcept(OfflinePack excluded) {
+        List<OfflinePack> installed = new ArrayList<>();
+        for (OfflinePack candidate : catalogPacks) {
+            if (!candidate.artifactId().equals(excluded.artifactId())
+                    && packStore.isInstalled(candidate)) {
+                installed.add(candidate);
+            }
+        }
+        installed.sort(Comparator.comparing(OfflinePack::artifactId));
+        return installed.isEmpty() ? null : installed.get(0);
+    }
+
+    private void removePack(OfflinePack target) {
+        showLibrary();
+        deletingPackId = target.artifactId();
+        KiwixArchive archiveToClose = detachArchiveForMutation(target);
+        renderPackRows();
+        PackTaskCoordinator.execute(() -> {
+            if (archiveToClose != null) {
+                archiveToClose.close();
             }
             try {
-                boolean removed = packStore.deleteInstalled(pack);
+                boolean removed = packStore.deleteInstalled(target);
+                if (removed) {
+                    installedPackSnapshots.remove(target.artifactId());
+                }
                 postToUi(() -> {
-                    openSearchButton.setEnabled(true);
-                    removePackButton.setEnabled(true);
+                    deletingPackId = "";
                     if (removed) {
-                        renderAvailable();
+                        invalidPacks.remove(target.artifactId());
+                        packFailures.remove(target.artifactId());
+                        if (selectedPack != null
+                                && target.artifactId().equals(selectedPack.artifactId())) {
+                            selectedPack = null;
+                            try {
+                                packSelection.clearIfSelected(target);
+                            } catch (IOException ignored) {
+                                // restoreSelectedPack will ignore a selection without a file.
+                            }
+                        }
+                        restoreSelectedPack();
+                        renderPackRows();
                     } else {
-                        renderReady();
+                        renderPackRows();
                         showMessage("文件仍在使用，暂时无法删除");
                     }
                 });
             } catch (IOException error) {
                 postToUi(() -> {
-                    openSearchButton.setEnabled(true);
-                    removePackButton.setEnabled(true);
-                    renderReady();
+                    deletingPackId = "";
+                    renderPackRows();
                     showMessage(readableError(error));
                 });
             }
         });
+    }
+
+    /** Detaches a native archive before its backing file can be deleted or replaced. */
+    private KiwixArchive detachArchiveForMutation(OfflinePack target) {
+        String artifactId = target.artifactId();
+        boolean openingTarget = artifactId.equals(openingPackId);
+        boolean openedTarget = artifactId.equals(archivePackId);
+        if (!openingTarget && !openedTarget) {
+            return null;
+        }
+        archiveGeneration.incrementAndGet();
+        searchGeneration.incrementAndGet();
+        if (openingTarget) {
+            openingPackId = "";
+            homeSearchInput.setEnabled(true);
+        }
+        if (!openedTarget) {
+            return null;
+        }
+        articleWebView.stopLoading();
+        articleWebView.setWebViewClient(new WebViewClient());
+        articleWebView.loadUrl("about:blank");
+        resultAdapter.replace(null);
+        KiwixArchive detached = archive;
+        archive = null;
+        archivePackId = "";
+        return detached;
+    }
+
+    private void invalidateArchiveSession() {
+        archiveGeneration.incrementAndGet();
+        searchGeneration.incrementAndGet();
+        openingPackId = "";
+        homeSearchInput.setEnabled(true);
+        articleWebView.stopLoading();
+        articleWebView.setWebViewClient(new WebViewClient());
+        articleWebView.loadUrl("about:blank");
+        resultAdapter.replace(null);
+        KiwixArchive toClose = archive;
+        archive = null;
+        archivePackId = "";
+        if (toClose != null) {
+            PackTaskCoordinator.execute(toClose::close);
+        }
+        renderPackRows();
+    }
+
+    private void beginPackReconciliation() {
+        packReconcilePending = true;
+        offlinePackList.setEnabled(false);
+        refreshCatalogButton.setEnabled(false);
+        PackTaskCoordinator.execute(() -> postToUi(() -> {
+            packReconcilePending = false;
+            offlinePackList.setEnabled(true);
+            refreshCatalogButton.setEnabled(!catalogRefreshRunning);
+            loadLocalPackCatalog();
+            refreshLibraryState();
+            scheduleDownloadPoll();
+            if (currentScreen == Screen.LIBRARY && !catalogRefreshAttempted) {
+                refreshCatalog();
+            }
+        }));
     }
 
     private void loadInstalledVersionName() {
@@ -1284,8 +2043,9 @@ public final class MainActivity extends Activity {
 
         KiwixArchive toClose = archive;
         archive = null;
+        archivePackId = "";
         if (toClose != null) {
-            ioExecutor.execute(toClose::close);
+            PackTaskCoordinator.execute(toClose::close);
         }
         ioExecutor.shutdown();
         super.onDestroy();

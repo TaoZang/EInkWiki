@@ -2,12 +2,15 @@
 
 一个面向 Android 墨水屏设备的只读维基百科客户端。APK 本身不包含百科数据；用户安装后从 Kiwix 官方目录下载独立的 OpenZIM 离线包，然后在设备上完成搜索和全文阅读。
 
-当前是可运行的 MVP：内置一个约 41.9 MiB 的中文化学无图包下载项作为开发数据源，离线包不会打进 APK。
+当前是可运行的 MVP：书库从 Kiwix 官方 OPDS 目录读取全部中文 Wikipedia 包，支持同时安装多个 ZIM，并由用户指定首页使用的搜索库。APK 仍不包含百科数据；无网时会显示上次缓存目录，并保留一个约 41.9 MiB 的中文化学无图包作为首次兜底项。
 
 源码公开在 [TaoZang/EInkWiki](https://github.com/TaoZang/EInkWiki)，正式 APK 通过 [GitHub Releases](https://github.com/TaoZang/EInkWiki/releases/latest) 分发。
 
 ## 已实现
 
+- 默认进入只有关键词输入框的极简首页；右上角“书库”用于下载和管理离线包
+- 进入书库时按需更新 Kiwix 官方中文 Wikipedia 目录；当前目录包含全库、热门和 11 个主题系列的 mini / nopic / maxi 变体
+- 支持多个离线包共存、逐包下载/取消/校验/删除，并可明确切换唯一的“当前搜索库”
 - 使用系统 `DownloadManager` 下载，应用退出或进程重启后仍可继续由系统管理
 - 下载进度恢复、取消和失败重试
 - 文件大小、SHA-256、libzim 可读性三重校验，再从 `.partial` 原子激活为 `.zim`
@@ -33,7 +36,13 @@
 0e1e49f9526b8b626a46d0b571db77bbe45e1c7635031c9ddd56553278ef6224
 ```
 
-## 开发离线包
+## 离线包目录与兜底包
+
+应用访问 Kiwix 的[中文 Wikipedia OPDS v2 目录](https://opds.library.kiwix.org/catalog/v2/entries?lang=zho&category=wikipedia&count=-1)。目录元数据会缓存在本机；用户点击某个包的“下载”后，应用再读取该条目的官方 `.meta4`，取得精确文件大小与 SHA-256，校验信息准备完成后才交给系统下载。
+
+`mini` 是精简无图内容，`nopic` 是完整正文无图，`maxi` 是完整正文含图。书库只展示每个系列的当前版本；已安装的旧版本描述会单独保留，不会因远端目录换月而消失。
+
+首次无缓存且目录不可达时使用以下兜底项：
 
 | 字段 | 值 |
 |---|---|
@@ -67,7 +76,7 @@ APK 只包含 `arm64-v8a` 和 `armeabi-v7a` native library，覆盖目标墨水�
 ./gradlew connectedDebugAndroidTest
 ```
 
-项目已在 Android 15/API 35 ARM64 16 KB 页大小模拟器上完成下载、校验、全文搜索、阅读、翻页及进程重启恢复测试。测试记录和截图见 [artifacts/emulator-test-20260817/README.md](artifacts/emulator-test-20260817/README.md)。
+项目已在 Android 15/API 35 ARM64 16 KB 页大小模拟器上完成 31 项目录加载、双包共存、13.5 MiB 包实际下载与校验、搜索库切换、进程重启恢复、全文搜索及阅读测试。此前单包流程的测试记录和截图见 [artifacts/emulator-test-20260817/README.md](artifacts/emulator-test-20260817/README.md)。
 
 ## 代码结构
 
@@ -77,6 +86,7 @@ app/src/main/java/org/einkwiki/app/
 ├── EInkProgressView.java          无动画静态进度条
 ├── data/                          离线包目录、版本和校验状态
 ├── download/                      Android DownloadManager 封装
+├── library/                       离线包行状态与无动画列表适配器
 ├── reader/                        ICU/libkiwix、搜索、ZIM 资源与 WebView
 └── update/                        GitHub Release、APK 校验与系统安装器
 ```
