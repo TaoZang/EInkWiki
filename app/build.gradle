@@ -1,0 +1,103 @@
+plugins {
+    id 'com.android.application'
+}
+
+def configuredVersionCode = providers.gradleProperty('versionCode')
+        .orElse('1')
+        .get()
+        .toInteger()
+def configuredVersionName = providers.gradleProperty('versionName')
+        .orElse('0.1.0')
+        .get()
+
+if (configuredVersionCode < 1) {
+    throw new GradleException('versionCode must be a positive integer')
+}
+if (!(configuredVersionName ==~ /\d+\.\d+\.\d+/)) {
+    throw new GradleException('versionName must use canonical X.Y.Z form')
+}
+
+configurations.configureEach {
+    // libkiwix also brings AndroidX Core through core-ktx. Exclude this on
+    // every path so profile installation never schedules background work.
+    exclude group: 'androidx.profileinstaller', module: 'profileinstaller'
+}
+
+android {
+    namespace 'org.einkwiki.app'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'org.einkwiki.app'
+        minSdk 24
+        targetSdk 35
+        versionCode configuredVersionCode
+        versionName configuredVersionName
+
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+
+        // The intended e-reader hardware is ARM. Excluding desktop emulator ABIs
+        // keeps the APK materially smaller despite libkiwix's native libraries.
+        ndk {
+            abiFilters 'arm64-v8a', 'armeabi-v7a'
+        }
+    }
+
+    sourceSets {
+        main {
+            // Ship readable license copies even though dependency META-INF
+            // files are de-duplicated during APK packaging.
+            assets.srcDir rootProject.file('licenses')
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+        resources {
+            excludes += [
+                    'META-INF/DEPENDENCIES',
+                    'META-INF/LICENSE',
+                    'META-INF/LICENSE.txt',
+                    'META-INF/NOTICE',
+                    'META-INF/NOTICE.txt'
+            ]
+        }
+    }
+
+    lint {
+        abortOnError true
+        checkReleaseBuilds true
+    }
+}
+
+dependencies {
+    implementation 'org.kiwix:libkiwix:2.6.0'
+    // FileProvider hands a verified APK to Android's system installer.
+    implementation 'androidx.core:core:1.15.0'
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test:runner:1.7.0'
+    androidTestImplementation 'androidx.test.ext:junit:1.3.0'
+}

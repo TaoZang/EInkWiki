@@ -1,0 +1,20 @@
+.gradle/
+.idea/
+local.properties
+*.iml
+build/
+app/build/
+captures/
+.DS_Store
+
+# Release signing material must never enter source control.
+*.jks
+*.keystore
+*.p12
+keystore.properties
+.signing/
+
+# Downloaded ZIM archives are runtime data, never source assets.
+*.zim
+*.zim.partial
+!app/src/androidTest/assets/*.zim
